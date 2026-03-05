@@ -3,19 +3,28 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SITREP — Tactical Ops Dashboard</title>
+  <meta name="theme-color" content="#0a0e0a" />
+  <meta name="description" content="SITREP — Military-grade tactical ops dashboard for production health monitoring" />
+  <title>🟢 SITREP — Tactical Ops</title>
   <link rel="stylesheet" href="style.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
 </head>
 <body>
   <!-- SCANLINE OVERLAY -->
   <div class="scanlines"></div>
 
+  <!-- COUNTDOWN BAR -->
+  <div class="countdown-container">
+    <div class="countdown-bar" id="countdownBar"></div>
+  </div>
+
   <!-- HEADER -->
   <header>
     <div class="header-left">
       <div class="logo">◉ SITREP</div>
-      <div class="subtitle">TACTICAL OPS DASHBOARD — CLASSIFICATION: UNCLASSIFIED</div>
+      <div class="subtitle">TACTICAL OPS DASHBOARD v2.0 — CLASSIFICATION: UNCLASSIFIED</div>
     </div>
     <div class="header-right">
       <div class="clock" id="clock">--:--:--</div>
@@ -48,9 +57,14 @@
       <span class="label">LAST SWEEP</span>
       <span class="value" id="lastSweep">--:--:--</span>
     </div>
-    <button class="refresh-btn" id="refreshBtn" title="Force reconnaissance">
-      ⟳ RECON
-    </button>
+
+    <!-- CONTROLS -->
+    <div class="controls-group">
+      <button class="control-btn" id="soundToggle" title="Alerts: ON (M)">🔊</button>
+      <button class="control-btn" id="notifToggle" title="Notifications: OFF (N)">🔕</button>
+      <button class="control-btn" id="helpBtn" title="Help (?)" onclick="document.getElementById('helpModal').classList.toggle('visible')">?</button>
+      <button class="refresh-btn" id="refreshBtn" title="Force reconnaissance (R)">⟳ RECON</button>
+    </div>
   </div>
 
   <!-- OVERALL STATUS BANNER -->
@@ -64,19 +78,38 @@
 
   <!-- INCIDENT LOG -->
   <div class="incident-log" id="incidentLog">
-    <div class="log-header">
-      <span>▸ INCIDENT LOG</span>
+    <div class="log-header" id="logHeader">
+      <span>▸ INCIDENT LOG <span class="incident-badge" id="incidentBadge" style="display:none">0</span></span>
       <button class="log-toggle" id="logToggle">▾</button>
     </div>
     <div class="log-body" id="logBody">
-      <div class="log-entry init">[BOOT] SITREP ONLINE — Awaiting first reconnaissance sweep...</div>
+      <div class="log-entry init">[BOOT] SITREP v2.0 ONLINE — Awaiting first reconnaissance sweep...</div>
     </div>
   </div>
 
-  <!-- AUDIO (status change beep) -->
-  <audio id="beepUp" preload="auto">
-    <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
-  </audio>
+  <!-- HELP MODAL -->
+  <div class="help-modal" id="helpModal">
+    <div class="help-content">
+      <div class="help-title">⌨ KEYBOARD SHORTCUTS</div>
+      <div class="help-grid">
+        <kbd>R</kbd><span>Force reconnaissance</span>
+        <kbd>M</kbd><span>Toggle alert sound</span>
+        <kbd>N</kbd><span>Toggle notifications</span>
+        <kbd>?</kbd><span>Toggle this help</span>
+      </div>
+      <div class="help-title" style="margin-top:16px">📡 FEATURES</div>
+      <div class="help-list">
+        <div>🔊 Audio klaxon on service DOWN</div>
+        <div>🔔 Browser push notifications</div>
+        <div>📊 Latency sparkline history (30 pts)</div>
+        <div>⏱️ Uptime % tracking</div>
+        <div>🔐 SSL certificate expiry monitoring</div>
+        <div>💬 Discord webhook alerts (server-side)</div>
+        <div>📋 Persistent incident log</div>
+      </div>
+      <button class="help-close" onclick="this.closest('.help-modal').classList.remove('visible')">DISMISS</button>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

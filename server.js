@@ -19,6 +19,7 @@ const dnsResolve4 = promisify(dns.resolve4);
 const app = express();
 const PORT = process.env.PORT || 3333;
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || null;
+const CERT_EXPIRY_ALERT_DAYS = Number(process.env.CERT_EXPIRY_ALERT_DAYS) || 14;
 
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
@@ -85,6 +86,7 @@ async function sendDiscordAlert(incident) {
 
 // ── SSL Certificate Check ───────────────────────────────────────────────────
 const certCache = new Map(); // hostname → { validTo, daysLeft, issuer, checkedAt }
+const certAlertSent = new Map(); // hostname → daysLeft threshold last alerted
 const CERT_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6h
 
 function checkCert(hostname) {
@@ -122,6 +124,42 @@ async function pollCerts() {
     if (info) certCache.set(h, info);
   }
   console.log(`[SITREP] SSL certs checked: ${certCache.size} certs`);
+
+  // ── Cert expiry alerts ──
+  if (DISCORD_WEBHOOK) {
+    for (const [hostname, info] of certCache.entries()) {
+      if (info.daysLeft <= CERT_EXPIRY_ALERT_DAYS) {
+        // Only alert once per threshold bracket (avoids spam every 6h)
+        const bracket = info.daysLeft <= 1 ? 1 : info.daysLeft <= 3 ? 3 : info.daysLeft <= 7 ? 7 : 14;
+        const lastBracket = certAlertSent.get(hostname);
+        if (lastBracket === bracket) continue;
+        certAlertSent.set(hostname, bracket);
+
+        const color = info.daysLeft <= 1 ? 0xff0000 : info.daysLeft <= 3 ? 0xff3333 : info.daysLeft <= 7 ? 0xffaa00 : 0xffcc00;
+        const emoji = info.daysLeft <= 3 ? "🚨" : "⚠️";
+
+        fetch(DISCORD_WEBHOOK, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: info.daysLeft <= 3 ? "@here" : undefined,
+            embeds: [{
+              title: `${emoji} SSL Certificate Expiring — ${hostname}`,
+              description: `Certificate expires in **${info.daysLeft} day${info.daysLeft !== 1 ? "s" : ""}**`,
+              color,
+              fields: [
+                { name: "Hostname", value: hostname, inline: true },
+                { name: "Expires", value: info.validTo.split("T")[0], inline: true },
+                { name: "Issuer", value: info.issuer, inline: true },
+              ],
+              footer: { text: "SITREP — Cert Expiry Monitor" },
+              timestamp: new Date().toISOString(),
+            }],
+          }),
+        }).catch(() => {});
+      }
+    }
+  }
 }
 
 // ── Multi-layer diagnostic (DNS → TCP → TLS → HTTP) ────────────────────────

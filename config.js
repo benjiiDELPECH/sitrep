@@ -136,6 +136,15 @@ const TARGETS = [
     url: "https://grafana.delpech.dev",
     timeout: 10000,
   },
+  {
+    id: "sitrep",
+    name: "SITREP Dashboard",
+    group: "INFRA",
+    type: "web",
+    icon: "🎯",
+    url: "https://sitrep.delpech.dev/api/status",
+    timeout: 10000,
+  },
 ];
 
 module.exports = { TARGETS };

@@ -16,10 +16,20 @@
 
 const TARGETS = [
   // ── ALERT-IMMO ──────────────────────────────────────────────────────────
+  {
+    id: "alert-immo-gateway",
+    name: "Gateway API",
+    group: "ALERT-IMMO",
+    type: "spring-boot",
+    icon: "🚪",
+    url: "https://api.real-estate-analytics.com/actuator/health",
+    timeout: 10000,
+  },
   // Composite health: probes ALL internal backends via the Gateway's /api/system/health
+  // (requires gateway redeploy with SystemHealthController)
   {
     id: "alert-immo-system",
-    name: "Alert-Immo Platform",
+    name: "Backends Health",
     group: "ALERT-IMMO",
     type: "composite",
     icon: "🏠",

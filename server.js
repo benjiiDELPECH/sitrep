@@ -147,19 +147,31 @@ async function checkTarget(target) {
       }
     } catch { /* ignore */ }
 
-    // Determine status: for composite, use the aggregated status
+    // Determine status
     let status;
-    if (target.type === "composite" && details?.status) {
-      status = details.status === "UP" ? "OPERATIONAL"
-             : details.status === "DEGRADED" ? "DEGRADED"
-             : "DOWN";
+    let error = null;
+    if (target.type === "composite") {
+      if (!res.ok) {
+        // Composite endpoint not available (not deployed, auth issue, etc.)
+        status = "DOWN";
+        error = res.status === 401 ? "ENDPOINT_NOT_DEPLOYED (401 — redeploy gateway with SystemHealthController)"
+              : res.status === 404 ? "ENDPOINT_NOT_FOUND (404)"
+              : `HTTP_${res.status}`;
+      } else if (details?.status) {
+        status = details.status === "UP" ? "OPERATIONAL"
+               : details.status === "DEGRADED" ? "DEGRADED"
+               : "DOWN";
+      } else {
+        status = "DEGRADED";
+        error = "INVALID_RESPONSE — no status field in JSON";
+      }
     } else {
       status = res.ok ? "OPERATIONAL" : "DEGRADED";
     }
 
     return {
       id: target.id, status, httpCode: res.status, latency, details, components,
-      lastCheck: new Date().toISOString(), error: null,
+      lastCheck: new Date().toISOString(), error,
     };
   } catch (err) {
     clearTimeout(timeout);

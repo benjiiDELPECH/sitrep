@@ -1,0 +1,16 @@
+{
+  "name": "sitrep",
+  "version": "1.0.0",
+  "description": "SITREP — Tactical Ops Dashboard. Real-time health monitoring for all production assets.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

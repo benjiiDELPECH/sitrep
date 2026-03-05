@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SITREP — Tactical Ops Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+</head>
+<body>
+  <!-- SCANLINE OVERLAY -->
+  <div class="scanlines"></div>
+
+  <!-- HEADER -->
+  <header>
+    <div class="header-left">
+      <div class="logo">◉ SITREP</div>
+      <div class="subtitle">TACTICAL OPS DASHBOARD — CLASSIFICATION: UNCLASSIFIED</div>
+    </div>
+    <div class="header-right">
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="zulu" id="zulu">-- --- ---- ZULU</div>
+    </div>
+  </header>
+
+  <!-- STATUS BAR -->
+  <div class="status-bar" id="statusBar">
+    <div class="status-item">
+      <span class="label">ASSETS</span>
+      <span class="value" id="totalCount">--</span>
+    </div>
+    <div class="status-item operational">
+      <span class="indicator bg-green"></span>
+      <span class="label">OPERATIONAL</span>
+      <span class="value" id="opCount">--</span>
+    </div>
+    <div class="status-item degraded">
+      <span class="indicator bg-amber"></span>
+      <span class="label">DEGRADED</span>
+      <span class="value" id="degCount">--</span>
+    </div>
+    <div class="status-item down">
+      <span class="indicator bg-red"></span>
+      <span class="label">DOWN</span>
+      <span class="value" id="downCount">--</span>
+    </div>
+    <div class="status-item">
+      <span class="label">LAST SWEEP</span>
+      <span class="value" id="lastSweep">--:--:--</span>
+    </div>
+    <button class="refresh-btn" id="refreshBtn" title="Force reconnaissance">
+      ⟳ RECON
+    </button>
+  </div>
+
+  <!-- OVERALL STATUS BANNER -->
+  <div class="overall-banner" id="overallBanner">
+    <span class="banner-icon" id="bannerIcon">◉</span>
+    <span class="banner-text" id="bannerText">INITIALIZING SYSTEMS...</span>
+  </div>
+
+  <!-- GRID -->
+  <main id="grid"></main>
+
+  <!-- INCIDENT LOG -->
+  <div class="incident-log" id="incidentLog">
+    <div class="log-header">
+      <span>▸ INCIDENT LOG</span>
+      <button class="log-toggle" id="logToggle">▾</button>
+    </div>
+    <div class="log-body" id="logBody">
+      <div class="log-entry init">[BOOT] SITREP ONLINE — Awaiting first reconnaissance sweep...</div>
+    </div>
+  </div>
+
+  <!-- AUDIO (status change beep) -->
+  <audio id="beepUp" preload="auto">
+    <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=" type="audio/wav">
+  </audio>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -9,7 +9,12 @@
 const express = require("express");
 const path = require("path");
 const tls = require("tls");
+const net = require("net");
+const dns = require("dns");
+const { promisify } = require("util");
 const { TARGETS } = require("./config");
+
+const dnsResolve4 = promisify(dns.resolve4);
 
 const app = express();
 const PORT = process.env.PORT || 3333;
@@ -119,6 +124,65 @@ async function pollCerts() {
   console.log(`[SITREP] SSL certs checked: ${certCache.size} certs`);
 }
 
+// ── Multi-layer diagnostic (DNS → TCP → TLS → HTTP) ────────────────────────
+async function diagnoseFailure(url) {
+  const parsed = new URL(url);
+  const hostname = parsed.hostname;
+  const port = parsed.port || (parsed.protocol === "https:" ? 443 : 80);
+  const layers = { dns: null, tcp: null, tls: null };
+
+  // Layer 1: DNS
+  try {
+    const addresses = await dnsResolve4(hostname);
+    layers.dns = { ok: true, addresses };
+  } catch (err) {
+    layers.dns = { ok: false, error: err.code || err.message };
+    return { failedAt: "DNS", code: `DNS_${err.code || "FAIL"}`, layers,
+             message: `DNS resolution failed: ${err.code || err.message} — check your DNS records for ${hostname}` };
+  }
+
+  // Layer 2: TCP
+  try {
+    await new Promise((resolve, reject) => {
+      const sock = net.connect({ host: hostname, port, timeout: 5000 }, () => { sock.end(); resolve(); });
+      sock.on("error", reject);
+      sock.on("timeout", () => { sock.destroy(); reject(new Error("TCP_TIMEOUT")); });
+    });
+    layers.tcp = { ok: true, port };
+  } catch (err) {
+    layers.tcp = { ok: false, error: err.message };
+    return { failedAt: "TCP", code: `TCP_${err.code || "FAIL"}`, layers,
+             message: `TCP connection to ${hostname}:${port} failed — server may be down or port blocked` };
+  }
+
+  // Layer 3: TLS (only for HTTPS)
+  if (parsed.protocol === "https:") {
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = tls.connect({ host: hostname, port, servername: hostname, timeout: 5000 }, () => {
+          const cert = socket.getPeerCertificate();
+          if (cert && cert.valid_to) {
+            const daysLeft = Math.floor((new Date(cert.valid_to) - Date.now()) / 86400000);
+            layers.tls = { ok: true, daysLeft, validTo: cert.valid_to, issuer: cert.issuer?.O || "Unknown" };
+          } else {
+            layers.tls = { ok: true };
+          }
+          socket.end();
+          resolve();
+        });
+        socket.on("error", reject);
+        socket.on("timeout", () => { socket.destroy(); reject(new Error("TLS_TIMEOUT")); });
+      });
+    } catch (err) {
+      layers.tls = { ok: false, error: err.message };
+      return { failedAt: "TLS", code: "TLS_CERT_INVALID", layers,
+               message: `TLS handshake failed on ${hostname} — ${err.message}. Check cert-manager / Let's Encrypt.` };
+    }
+  }
+
+  return { failedAt: null, code: null, layers, message: null };
+}
+
 // ── Health check ────────────────────────────────────────────────────────────
 async function checkTarget(target) {
   const start = Date.now();
@@ -140,7 +204,6 @@ async function checkTarget(target) {
       const ct = res.headers.get("content-type") || "";
       if (ct.includes("json")) {
         details = await res.json();
-        // Composite type: extract sub-components
         if (target.type === "composite" && details.components) {
           components = details.components;
         }
@@ -150,9 +213,10 @@ async function checkTarget(target) {
     // Determine status
     let status;
     let error = null;
+    let diagnosis = null;
+
     if (target.type === "composite") {
       if (!res.ok) {
-        // Composite endpoint not available (not deployed, auth issue, etc.)
         status = "DOWN";
         error = res.status === 401 ? "ENDPOINT_NOT_DEPLOYED (401 — redeploy gateway with SystemHealthController)"
               : res.status === 404 ? "ENDPOINT_NOT_FOUND (404)"
@@ -167,19 +231,35 @@ async function checkTarget(target) {
       }
     } else {
       status = res.ok ? "OPERATIONAL" : "DEGRADED";
+      if (!res.ok) {
+        error = `HTTP_${res.status}`;
+      }
     }
 
     return {
       id: target.id, status, httpCode: res.status, latency, details, components,
-      lastCheck: new Date().toISOString(), error,
+      lastCheck: new Date().toISOString(), error, diagnosis,
     };
   } catch (err) {
     clearTimeout(timeout);
+    const latency = Date.now() - start;
+
+    // ── Multi-layer diagnosis on failure ──
+    let diagnosis = null;
+    let errorCode = err.name === "AbortError" ? "TIMEOUT" : err.message;
+    try {
+      diagnosis = await diagnoseFailure(target.url);
+      if (diagnosis.failedAt) {
+        errorCode = diagnosis.code;
+      }
+    } catch { /* diagnosis itself failed, keep original error */ }
+
     return {
       id: target.id, status: "DOWN", httpCode: null,
-      latency: Date.now() - start, details: null, components: null,
+      latency, details: null, components: null,
       lastCheck: new Date().toISOString(),
-      error: err.name === "AbortError" ? "TIMEOUT" : err.message,
+      error: errorCode,
+      diagnosis,
     };
   }
 }

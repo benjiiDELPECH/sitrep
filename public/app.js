@@ -266,8 +266,29 @@ function render(data) {
       const sparkline = sparklineSVG(t.latencyHistory);
       const sparkHtml = sparkline ? `<div class="card-sparkline">${sparkline}</div>` : "";
 
+      // Composite sub-components rendering (for gateway aggregated health)
+      let componentsHtml = "";
+      if (t.type === "composite" && t.components) {
+        const comps = Object.entries(t.components);
+        const compItems = comps.map(([key, comp]) => {
+          const st = comp.status || "UNKNOWN";
+          const statusClass = st === "UP" ? "comp-up" : st === "DOWN" ? "comp-down" : "comp-degraded";
+          const criticalBadge = comp.critical ? "●" : "○";
+          const latMs = comp.latencyMs != null ? `${comp.latencyMs}ms` : "";
+          const errorTip = comp.error ? ` title="${comp.error}"` : "";
+          return `<div class="comp-row ${statusClass}"${errorTip}>
+            <span class="comp-critical">${criticalBadge}</span>
+            <span class="comp-name">${comp.name || key}</span>
+            <span class="comp-status">${st}</span>
+            <span class="comp-latency">${latMs}</span>
+          </div>`;
+        }).join("");
+        componentsHtml = `<div class="composite-panel">${compItems}</div>`;
+      }
+
+      // Legacy Spring Boot actuator details (non-composite)
       let detailsHtml = "";
-      if (t.details && t.details.components) {
+      if (!componentsHtml && t.details && t.details.components) {
         const comps = Object.entries(t.details.components);
         const compItems = comps.map(([name, info]) => {
           const st = info.status || "UNKNOWN";
@@ -313,6 +334,7 @@ function render(data) {
           ${certHtml}
         </div>
         ${detailsHtml}
+        ${componentsHtml}
         ${t.error ? `<div class="card-error">✖ ${t.error}</div>` : ""}
         <div class="card-url" title="${t.url}">${t.url}</div>
       `;

@@ -3,18 +3,28 @@
 // ============================================================================
 // Each target is a production asset to monitor.
 // Groups: ALERT-IMMO, EXAM-DRILL, CAPIPILOT, IMPACTDROIT, FRONTEND, INFRA
+//
+// Target types:
+//   - "spring-boot"  → expects JSON with { status: "UP" }
+//   - "vercel"       → HTTP 200 = UP
+//   - "web"          → HTTP 200 = UP
+//   - "composite"    → aggregated health from /api/system/health
+//                       returns { status, components: { id: { status, latencyMs } } }
+//   - "grafana"      → HTTP 200 = UP
+//   - "uptime-kuma"  → HTTP 200 = UP
 // ============================================================================
 
 const TARGETS = [
   // ── ALERT-IMMO ──────────────────────────────────────────────────────────
+  // Composite health: probes ALL internal backends via the Gateway's /api/system/health
   {
-    id: "alert-immo-gateway",
-    name: "Gateway API",
+    id: "alert-immo-system",
+    name: "Alert-Immo Platform",
     group: "ALERT-IMMO",
-    type: "spring-boot",
+    type: "composite",
     icon: "🏠",
-    url: "https://api.real-estate-analytics.com/actuator/health",
-    timeout: 10000,
+    url: "https://api.real-estate-analytics.com/api/system/health",
+    timeout: 15000,
   },
   {
     id: "alert-immo-frontend",

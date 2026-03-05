@@ -133,20 +133,39 @@ async function checkTarget(target) {
     });
     clearTimeout(timeout);
     const latency = Date.now() - start;
-    const status = res.ok ? "OPERATIONAL" : "DEGRADED";
 
     let details = null;
+    let components = null;
     try {
       const ct = res.headers.get("content-type") || "";
-      if (ct.includes("json")) details = await res.json();
+      if (ct.includes("json")) {
+        details = await res.json();
+        // Composite type: extract sub-components
+        if (target.type === "composite" && details.components) {
+          components = details.components;
+        }
+      }
     } catch { /* ignore */ }
 
-    return { id: target.id, status, httpCode: res.status, latency, details, lastCheck: new Date().toISOString(), error: null };
+    // Determine status: for composite, use the aggregated status
+    let status;
+    if (target.type === "composite" && details?.status) {
+      status = details.status === "UP" ? "OPERATIONAL"
+             : details.status === "DEGRADED" ? "DEGRADED"
+             : "DOWN";
+    } else {
+      status = res.ok ? "OPERATIONAL" : "DEGRADED";
+    }
+
+    return {
+      id: target.id, status, httpCode: res.status, latency, details, components,
+      lastCheck: new Date().toISOString(), error: null,
+    };
   } catch (err) {
     clearTimeout(timeout);
     return {
       id: target.id, status: "DOWN", httpCode: null,
-      latency: Date.now() - start, details: null,
+      latency: Date.now() - start, details: null, components: null,
       lastCheck: new Date().toISOString(),
       error: err.name === "AbortError" ? "TIMEOUT" : err.message,
     };
@@ -211,6 +230,7 @@ app.get("/api/status", (_req, res) => {
       uptime,
       uptimeSince: ut?.since || null,
       certInfo,
+      components: check.components || null,
     };
   });
 

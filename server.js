@@ -407,7 +407,7 @@ app.get("/api/database-metrics", (_req, res) => {
 async function pollDatabaseMetrics() {
   const prometheusUrl = process.env.PROMETHEUS_URL;
   if (!prometheusUrl) return;
-  
+
   try {
     // Query Alert-Immo metrics
     const [charge, pool, size, incidents, backup] = await Promise.all([
@@ -417,7 +417,7 @@ async function pollDatabaseMetrics() {
       queryPrometheus(prometheusUrl, 'count_over_time(ALERTS{severity=~"P1|P2",app="alert-immo",component="postgres"}[90d])'),
       queryPrometheus(prometheusUrl, 'time() - kube_job_status_completion_time{job_name=~"postgres-backup.*",namespace="alert-immo"}'),
     ]);
-    
+
     dbMetrics.set('alert-immo', {
       charge_pct: parseFloat(charge?.value?.[1]) || 0,
       pool_pct: parseFloat(pool?.value?.[1]) || 0,
@@ -426,7 +426,7 @@ async function pollDatabaseMetrics() {
       last_backup_hours_ago: (parseFloat(backup?.value?.[1]) || 0) / 3600,
       updated_at: new Date().toISOString(),
     });
-    
+
     console.log(`[SITREP] Database metrics updated: ${dbMetrics.size} apps`);
   } catch (err) {
     console.error(`[SITREP] Failed to fetch database metrics: ${err.message}`);
@@ -450,18 +450,18 @@ function evaluateDecisionMatrix(data) {
     pool_saturation: data.pool_pct > 60,
     size_large: data.size_gb > 50,
   };
-  
+
   const critical_count = Object.values(critical).filter(Boolean).length;
   const important_count = Object.values(important).filter(Boolean).length;
-  
+
   return {
     critical,
     important,
     critical_count,
     important_count,
     should_migrate: critical_count >= 1 || important_count >= 2,
-    recommendation: critical_count >= 1 || important_count >= 2 
-      ? 'MIGRATE_DEDICATED' 
+    recommendation: critical_count >= 1 || important_count >= 2
+      ? 'MIGRATE_DEDICATED'
       : 'STAY_SHARED',
   };
 }

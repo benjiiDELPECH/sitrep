@@ -7,6 +7,8 @@
 // ============================================================================
 
 const express = require("express");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const path = require("path");
 const tls = require("tls");
 const net = require("net");
@@ -20,6 +22,41 @@ const app = express();
 const PORT = process.env.PORT || 3333;
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || null;
 const CERT_EXPIRY_ALERT_DAYS = Number(process.env.CERT_EXPIRY_ALERT_DAYS) || 14;
+
+// ── Security hardening ──────────────────────────────────────────────────────
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Allow loading external fonts
+}));
+
+// ── Rate limiting ───────────────────────────────────────────────────────────
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 60,                  // 60 requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+
+const refreshLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 5,                   // 5 manual refreshes per minute max
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Refresh rate limited. Please wait." },
+});
+
+app.use("/api/", apiLimiter);
+app.use("/api/status/refresh", refreshLimiter);
 
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());

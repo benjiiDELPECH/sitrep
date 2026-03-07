@@ -60,7 +60,7 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
     id: "alert-immo-frontend",
     name: "Frontend",
     group: "ALERT-IMMO",
-    type: "vercel",
+    type: "web",
     icon: "🖥️",
     url: "https://www.real-estate-analytics.com",
     timeout: 10000,
@@ -116,17 +116,10 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
     url: "https://www.impactdroit.com",
     timeout: 10000,
   },
-  {
-    id: "impactdroit-status",
-    name: "Status Page",
-    group: "IMPACTDROIT",
-    type: "uptime-kuma",
-    icon: "📊",
-    url: "https://status.impactdroit.com",
-    timeout: 10000,
-  },
+  // status.impactdroit.com — Uptime Kuma not deployed yet, no DNS record
+  // Re-add when deployed: { id: "impactdroit-status", url: "https://status.impactdroit.com", type: "uptime-kuma" }
 
-  // ── FRONTENDS (Vercel) ──────────────────────────────────────────────────
+  // ── FRONTENDS ───────────────────────────────────────────────────────────
   {
     id: "rent-apply",
     name: "Rent Apply",
@@ -136,15 +129,8 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
     url: "https://rent-apply.vercel.app",
     timeout: 10000,
   },
-  {
-    id: "portfolio",
-    name: "Portfolio",
-    group: "FRONTENDS",
-    type: "vercel",
-    icon: "👤",
-    url: "https://benjamindelpech.dev",
-    timeout: 10000,
-  },
+  // benjamindelpech.dev — DNS not configured yet
+  // Re-add when deployed: { id: "portfolio", url: "https://benjamindelpech.dev", type: "web" }
 
   // ── INFRA ───────────────────────────────────────────────────────────────
   {

@@ -35,6 +35,11 @@ const HISTORY_SIZE = 30;
 // ── Uptime tracking (rolling 24h window) ────────────────────────────────────
 const uptimeChecks = new Map(); // id → { up: number, total: number, since: ISO }
 
+// ── Database Isolation Policy Metrics ───────────────────────────────────────
+// Intégration avec data-isolation-policy.md Decision Matrix
+const dbMetrics = new Map(); // app_id → { charge_pct, pool_pct, size_gb, incidents_90d, last_backup }
+const DB_METRICS_REFRESH = 5 * 60 * 1000; // 5min
+
 // ── Incident log (server-side, last 200 entries) ────────────────────────────
 const incidents = [];
 const MAX_INCIDENTS = 200;
@@ -387,6 +392,79 @@ app.get("/api/incidents", (_req, res) => {
 app.get("/api/certs", (_req, res) => {
   res.json({ certs: [...certCache.values()] });
 });
+
+// ── Database Isolation Policy Metrics ───────────────────────────────────────
+app.get("/api/database-metrics", (_req, res) => {
+  const metrics = [...dbMetrics.entries()].map(([app_id, data]) => ({
+    app_id,
+    ...data,
+    decision_matrix: evaluateDecisionMatrix(data),
+  }));
+  res.json({ metrics, timestamp: new Date().toISOString() });
+});
+
+// ── Database Metrics Polling (Prometheus) ───────────────────────────────────
+async function pollDatabaseMetrics() {
+  const prometheusUrl = process.env.PROMETHEUS_URL;
+  if (!prometheusUrl) return;
+  
+  try {
+    // Query Alert-Immo metrics
+    const [charge, pool, size, incidents, backup] = await Promise.all([
+      queryPrometheus(prometheusUrl, 'alertimmo:database:charge_pct:7d'),
+      queryPrometheus(prometheusUrl, 'alertimmo:database:pool_saturation_pct:7d'),
+      queryPrometheus(prometheusUrl, 'alertimmo:database:size_gb'),
+      queryPrometheus(prometheusUrl, 'count_over_time(ALERTS{severity=~"P1|P2",app="alert-immo",component="postgres"}[90d])'),
+      queryPrometheus(prometheusUrl, 'time() - kube_job_status_completion_time{job_name=~"postgres-backup.*",namespace="alert-immo"}'),
+    ]);
+    
+    dbMetrics.set('alert-immo', {
+      charge_pct: parseFloat(charge?.value?.[1]) || 0,
+      pool_pct: parseFloat(pool?.value?.[1]) || 0,
+      size_gb: parseFloat(size?.value?.[1]) || 0,
+      incidents_90d: parseInt(incidents?.value?.[1]) || 0,
+      last_backup_hours_ago: (parseFloat(backup?.value?.[1]) || 0) / 3600,
+      updated_at: new Date().toISOString(),
+    });
+    
+    console.log(`[SITREP] Database metrics updated: ${dbMetrics.size} apps`);
+  } catch (err) {
+    console.error(`[SITREP] Failed to fetch database metrics: ${err.message}`);
+  }
+}
+
+async function queryPrometheus(baseUrl, query) {
+  const url = `${baseUrl}/api/v1/query?query=${encodeURIComponent(query)}`;
+  const res = await fetch(url, { timeout: 5000 });
+  if (!res.ok) throw new Error(`Prometheus query failed: ${res.status}`);
+  const data = await res.json();
+  return data?.data?.result?.[0] || null;
+}
+
+function evaluateDecisionMatrix(data) {
+  const critical = {
+    incidents_p1_p2: data.incidents_90d >= 2,
+  };
+  const important = {
+    charge_high: data.charge_pct > 35,
+    pool_saturation: data.pool_pct > 60,
+    size_large: data.size_gb > 50,
+  };
+  
+  const critical_count = Object.values(critical).filter(Boolean).length;
+  const important_count = Object.values(important).filter(Boolean).length;
+  
+  return {
+    critical,
+    important,
+    critical_count,
+    important_count,
+    should_migrate: critical_count >= 1 || important_count >= 2,
+    recommendation: critical_count >= 1 || important_count >= 2 
+      ? 'MIGRATE_DEDICATED' 
+      : 'STAY_SHARED',
+  };
+}
 
 // ── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {

@@ -4,6 +4,9 @@
 // Each target is a production asset to monitor.
 // Groups: ALERT-IMMO, EXAM-DRILL, CAPIPILOT, IMPACTDROIT, FRONTEND, INFRA
 //
+// Anti-ClickOps: Targets can be overridden via SITREP_TARGETS_FILE env var
+// pointing to a JSON file (e.g., mounted ConfigMap in K8s).
+//
 // Target types:
 //   - "spring-boot"  → expects JSON with { status: "UP" }
 //   - "vercel"       → HTTP 200 = UP
@@ -14,7 +17,24 @@
 //   - "uptime-kuma"  → HTTP 200 = UP
 // ============================================================================
 
-const TARGETS = [
+const fs = require("fs");
+const path = require("path");
+
+// Allow external config file override (K8s ConfigMap, Docker volume mount)
+const externalConfigPath = process.env.SITREP_TARGETS_FILE;
+let TARGETS;
+
+if (externalConfigPath && fs.existsSync(externalConfigPath)) {
+  try {
+    TARGETS = JSON.parse(fs.readFileSync(externalConfigPath, "utf8"));
+    console.log(`[config] Loaded ${TARGETS.length} targets from ${externalConfigPath}`);
+  } catch (err) {
+    console.error(`[config] Failed to load external targets: ${err.message}`);
+    process.exit(1);
+  }
+} else {
+  // Default embedded targets — EDIT HERE or override via SITREP_TARGETS_FILE
+  TARGETS = [
   // ── ALERT-IMMO ──────────────────────────────────────────────────────────
   {
     id: "alert-immo-gateway",
@@ -146,5 +166,6 @@ const TARGETS = [
     timeout: 10000,
   },
 ];
+}
 
 module.exports = { TARGETS };

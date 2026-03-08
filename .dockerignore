@@ -1,5 +1,10 @@
 .git
 node_modules
 .github
-README.md
+.env
+.env.*
+.dockerignore
 .gitignore
+Dockerfile
+README.md
+parse-status.py

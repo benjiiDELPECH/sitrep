@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🟢 SITREP — Cartographie Infra</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    #cy {
+      width: 100vw;
+      height: 90vh;
+      background: #0a0e0a;
+      border: 2px solid #1a2e1a;
+      margin-top: 16px;
+      border-radius: 8px;
+    }
+    .cy-tooltip {
+      position: absolute;
+      background: #222;
+      color: #fff;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      pointer-events: none;
+      z-index: 10;
+      opacity: 0.95;
+      box-shadow: 0 2px 8px #000a;
+    }
+  </style>
+  <script src="https://unpkg.com/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <div class="logo">◉ SITREP</div>
+      <div class="subtitle">CARTOGRAPHIE INFRASTRUCTURE — LIVE</div>
+    </div>
+  </header>
+  <div id="cy"></div>
+  <div id="sidepanel" style="display:none;position:fixed;top:0;right:0;width:340px;height:100vh;background:#181c1f;border-left:2px solid #222;box-shadow:-2px 0 12px #000a;z-index:1000;padding:24px 18px 18px 18px;color:#fff;overflow-y:auto;">
+    <button id="closePanel" style="position:absolute;top:12px;right:12px;font-size:18px;background:none;border:none;color:#fff;cursor:pointer;">✕</button>
+    <div id="panelContent"></div>
+  </div>
+  <script>
+    async function fetchInfraGraph() {
+      const res = await fetch('/api/infra-graph');
+      if (!res.ok) throw new Error('API error');
+      return await res.json();
+    }
+
+    function statusColor(status) {
+      if (status === 'OPERATIONAL') return '#00ff41';
+      if (status === 'DEGRADED') return '#ffaa00';
+      if (status === 'DOWN') return '#ff3333';
+      return '#666';
+    }
+
+    function typeShape(type) {
+      if (type === 'server') return 'rectangle';
+      if (type === 'docker') return 'ellipse';
+      if (type === 'k8s') return 'hexagon';
+      if (type === 'external') return 'diamond';
+      return 'ellipse';
+    }
+
+
+    let cy = null;
+    let tooltip = null;
+    let lastSelected = null;
+
+    function renderGraph(data) {
+      if (cy) cy.destroy();
+      cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements: [...data.nodes, ...data.edges],
+        style: [
+          {
+            selector: 'node',
+            style: {
+              'background-color': ele => statusColor(ele.data('status')),
+              'label': 'data(label)',
+              'shape': ele => typeShape(ele.data('type')),
+              'width': 60,
+              'height': 60,
+              'font-size': 14,
+              'color': '#fff',
+              'text-valign': 'center',
+              'text-halign': 'center',
+              'border-width': 3,
+              'border-color': '#222',
+              'text-outline-width': 2,
+              'text-outline-color': '#111',
+              'transition-property': 'background-color',
+              'transition-duration': '0.5s',
+            }
+          },
+          {
+            selector: 'edge',
+            style: {
+              'width': 4,
+              'line-color': ele => ele.data('critical') ? '#ffb300' : '#444',
+              'target-arrow-color': ele => ele.data('critical') ? '#ffb300' : '#888',
+              'target-arrow-shape': 'triangle',
+              'curve-style': 'bezier',
+              'opacity': 0.9
+            }
+          },
+          {
+            selector: '.highlighted',
+            style: {
+              'background-color': '#00aaff',
+              'border-color': '#fff',
+              'border-width': 5,
+              'z-index': 9999
+            }
+          },
+          {
+            selector: '.edge-highlight',
+            style: {
+              'line-color': '#ff3333',
+              'width': 7,
+              'opacity': 1
+            }
+          }
+        ],
+        layout: {
+          name: 'cose',
+          animate: true,
+          fit: true,
+          padding: 40,
+        }
+      });
+
+      // Tooltip on hover (diagnostic + incidents)
+      cy.on('mouseover', 'node', function(evt) {
+        const node = evt.target;
+        tooltip = document.createElement('div');
+        tooltip.className = 'cy-tooltip';
+        let html = `<b>${node.data('label')}</b><br>Etat: <b>${node.data('status')}</b>`;
+        if (node.data('diagnostic')) html += `<br>Diag: <span style='color:#ffa'>${node.data('diagnostic')}</span>`;
+        if (node.data('incidents') && node.data('incidents').length > 0) {
+          html += `<br><b>Incidents:</b><ul style='margin:0;padding-left:16px;'>`;
+          for (const inc of node.data('incidents')) {
+            html += `<li>${inc.at ? inc.at.substring(11,19) : ''} ${inc.from}→${inc.to}</li>`;
+          }
+          html += `</ul>`;
+        }
+        tooltip.innerHTML = html;
+        document.body.appendChild(tooltip);
+        const pos = node.renderedPosition();
+        tooltip.style.left = (pos.x + 80) + 'px';
+        tooltip.style.top = (pos.y + 60) + 'px';
+      });
+      cy.on('mouseout', 'node', function() {
+        if (tooltip) { tooltip.remove(); tooltip = null; }
+      });
+
+      // Clic sur un nœud : panneau latéral détaillé + surbrillance dépendances
+      cy.on('tap', 'node', function(evt) {
+        const node = evt.target;
+        // Highlight node and critical edges
+        cy.elements().removeClass('highlighted edge-highlight');
+        node.addClass('highlighted');
+        // Highlight all critical edges (in/out)
+        node.connectedEdges().forEach(edge => {
+          if (edge.data('critical')) edge.addClass('edge-highlight');
+        });
+        // Panneau latéral
+        const panel = document.getElementById('sidepanel');
+        const content = document.getElementById('panelContent');
+        let html = `<h2 style='margin-top:0'>${node.data('label')}</h2>`;
+        html += `<div style='margin-bottom:8px'><b>Etat:</b> <span style='color:${statusColor(node.data('status'))};font-weight:bold'>${node.data('status')}</span></div>`;
+        if (node.data('diagnostic')) html += `<div><b>Diagnostic:</b> <span style='color:#ffa'>${node.data('diagnostic')}</span></div>`;
+        if (node.data('uptime')) html += `<div><b>Uptime:</b> ${node.data('uptime')}</div>`;
+        if (node.data('url')) html += `<div><b>URL:</b> <a href='${node.data('url')}' target='_blank' style='color:#8cf'>${node.data('url')}</a></div>`;
+        // Dépendances sortantes
+        const outEdges = node.connectedEdges().filter(e => e.source().id() === node.id());
+        if (outEdges.length > 0) {
+          html += `<div style='margin-top:12px'><b>Dépendances sortantes:</b><ul style='margin:0;padding-left:16px;'>`;
+          outEdges.forEach(e => {
+            html += `<li>${e.target().data('label')} ${e.data('critical') ? '<span style="color:#ffb300">(critique)</span>' : ''}</li>`;
+          });
+          html += `</ul></div>`;
+        }
+        // Dépendances entrantes
+        const inEdges = node.connectedEdges().filter(e => e.target().id() === node.id());
+        if (inEdges.length > 0) {
+          html += `<div style='margin-top:8px'><b>Dépendances entrantes:</b><ul style='margin:0;padding-left:16px;'>`;
+          inEdges.forEach(e => {
+            html += `<li>${e.source().data('label')} ${e.data('critical') ? '<span style="color:#ffb300">(critique)</span>' : ''}</li>`;
+          });
+          html += `</ul></div>`;
+        }
+        // Incidents
+        if (node.data('incidents') && node.data('incidents').length > 0) {
+          html += `<div style='margin-top:12px'><b>Incidents récents:</b><ul style='margin:0;padding-left:16px;'>`;
+          for (const inc of node.data('incidents')) {
+            html += `<li>${inc.at ? inc.at.replace('T',' ').substring(0,19) : ''} <b>${inc.from}→${inc.to}</b></li>`;
+          }
+          html += `</ul></div>`;
+        }
+        content.innerHTML = html;
+        panel.style.display = 'block';
+        lastSelected = node.id();
+      });
+      // Clic hors nœud : ferme le panneau et retire la surbrillance
+      cy.on('tap', function(evt) {
+        if (evt.target === cy) {
+          cy.elements().removeClass('highlighted edge-highlight');
+          document.getElementById('sidepanel').style.display = 'none';
+          lastSelected = null;
+        }
+      });
+    }
+
+    // Initial + periodic render
+    async function updateGraph() {
+      try {
+        const data = await fetchInfraGraph();
+        renderGraph(data);
+      } catch (e) {
+        if (cy) cy.destroy();
+        document.getElementById('cy').innerHTML = '<div style="color:#f33;padding:2em;">Erreur chargement cartographie</div>';
+      }
+    }
+    updateGraph();
+    setInterval(updateGraph, 30000);
+
+    // Fermer le panneau latéral
+    document.getElementById('closePanel').onclick = function() {
+      document.getElementById('sidepanel').style.display = 'none';
+      if (cy) cy.elements().removeClass('highlighted edge-highlight');
+      lastSelected = null;
+    };
+  </script>
+</body>
+</html>

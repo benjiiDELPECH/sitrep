@@ -22,14 +22,19 @@
 
   <!-- HEADER -->
   <header>
-    <div class="header-left">
-      <div class="logo">◉ SITREP</div>
-      <div class="subtitle">TACTICAL OPS DASHBOARD v2.0 — CLASSIFICATION: UNCLASSIFIED</div>
-    </div>
-    <div class="header-right">
-      <div class="clock" id="clock">--:--:--</div>
-      <div class="zulu" id="zulu">-- --- ---- ZULU</div>
-    </div>
+    <nav style="display:flex;align-items:center;gap:24px;padding:10px 0 6px 0;border-bottom:1.5px solid #1a2e1a;background:#101314;">
+      <span class="logo" style="font-size:22px;font-weight:bold;color:#00ff41;margin-left:18px;">◉ SITREP</span>
+      <a href="index.html" style="color:#fff;text-decoration:none;font-weight:bold;">Dashboard</a>
+      <a href="infra.html" style="color:#fff;text-decoration:none;font-weight:bold;">Cartographie</a>
+      <a href="#incidentLog" style="color:#fff;text-decoration:none;font-weight:bold;">Incidents</a>
+      <a href="#helpModal" onclick="document.getElementById('helpModal').classList.toggle('visible');return false;" style="color:#fff;text-decoration:none;font-weight:bold;">Aide</a>
+      <span style="flex:1"></span>
+      <span class="subtitle" style="color:#b0c4b0;font-size:13px;">TACTICAL OPS DASHBOARD v2.0 — CLASSIFICATION: UNCLASSIFIED</span>
+      <span style="margin-left:24px;color:#fff;">
+        <span class="clock" id="clock">--:--:--</span>
+        <span class="zulu" id="zulu" style="margin-left:10px;">-- --- ---- ZULU</span>
+      </span>
+    </nav>
   </header>
 
   <!-- STATUS BAR -->
@@ -63,6 +68,7 @@
       <button class="control-btn" id="soundToggle" title="Alerts: ON (M)">🔊</button>
       <button class="control-btn" id="notifToggle" title="Notifications: OFF (N)">🔕</button>
       <button class="control-btn" id="helpBtn" title="Help (?)" onclick="document.getElementById('helpModal').classList.toggle('visible')">?</button>
+      <button class="control-btn" id="infraBtn" title="Cartographie Infra" onclick="window.open('infra.html','_blank')">🗺️ INFRA</button>
       <button class="refresh-btn" id="refreshBtn" title="Force reconnaissance (R)">⟳ RECON</button>
     </div>
   </div>

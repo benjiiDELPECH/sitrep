@@ -19,6 +19,7 @@ const { TARGETS } = require("./config");
 const dnsResolve4 = promisify(dns.resolve4);
 
 const app = express();
+app.set("trust proxy", 1); // Behind Traefik — required for rate limiting
 const PORT = process.env.PORT || 3333;
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || null;
 const CERT_EXPIRY_ALERT_DAYS = Number(process.env.CERT_EXPIRY_ALERT_DAYS) || 14;
@@ -28,7 +29,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:"],
@@ -54,6 +55,9 @@ const refreshLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Refresh rate limited. Please wait." },
 });
+
+// ── Lightweight health probe (not rate-limited) ─────────────────────────────
+app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
 
 app.use("/api/", apiLimiter);
 app.use("/api/status/refresh", refreshLimiter);
@@ -426,8 +430,67 @@ app.get("/api/incidents", (_req, res) => {
   res.json({ incidents });
 });
 
-app.get("/api/certs", (_req, res) => {
-  res.json({ certs: [...certCache.values()] });
+
+// ── API: Infra Graph (Cytoscape.js) ───────────────────────────────────────
+app.get("/api/infra-graph", (_req, res) => {
+  // 1. Nodes: map all targets as nodes
+  const nodes = TARGETS.map((t) => {
+    const check = cache.get(t.id) || { status: "UNKNOWN", error: "PENDING_FIRST_CHECK" };
+    // Incidents for this node (last 3)
+    const nodeIncidents = incidents.filter(i => i.id === t.id).slice(0, 3);
+    return {
+      data: {
+        id: t.id,
+        label: t.name,
+        type: t.type || "service",
+        status: check.status,
+        group: t.group || null,
+        diagnostic: check.error || check.diagnosis?.code || "OK",
+        incidents: nodeIncidents,
+        url: t.url,
+        latency: check.latency || null,
+        uptime: (uptimeChecks.get(t.id)?.up || 0) + "/" + (uptimeChecks.get(t.id)?.total || 0),
+      }
+    };
+  });
+
+  // 2. Edges: simple heuristics (Traefik → services, Worker → containers, etc)
+  // For demo: statically define some edges (could be improved with config)
+  const edges = [];
+  // Example: Traefik routes
+  const traefik = TARGETS.find(t => t.id === "traefik");
+  if (traefik) {
+    for (const t of TARGETS) {
+      if (t.id !== "traefik" && t.group && ["k8s", "docker"].includes(t.type)) {
+        edges.push({ data: { source: "traefik", target: t.id, type: "network", critical: true } });
+      }
+    }
+  }
+  // Example: Worker-1 → containers
+  const worker = TARGETS.find(t => t.id === "worker1");
+  if (worker) {
+    for (const t of TARGETS) {
+      if (t.id !== "worker1" && t.group && t.group === worker.group && t.type !== "server") {
+        edges.push({ data: { source: "worker1", target: t.id, type: "hosted-on" } });
+      }
+    }
+  }
+  // Example: Gitea → PostgreSQL
+  if (TARGETS.find(t => t.id === "gitea") && TARGETS.find(t => t.id === "pg-gitea")) {
+    edges.push({ data: { source: "gitea", target: "pg-gitea", type: "db", critical: true } });
+  }
+  // Example: Next.js → Spring Boot
+  if (TARGETS.find(t => t.id === "nextjs") && TARGETS.find(t => t.id === "spring")) {
+    edges.push({ data: { source: "nextjs", target: "spring", type: "api" } });
+  }
+
+  // TODO: enrich with more edges as needed
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    nodes,
+    edges
+  });
 });
 
 // ── Database Isolation Policy Metrics ───────────────────────────────────────
@@ -504,7 +567,7 @@ function evaluateDecisionMatrix(data) {
 }
 
 // ── Start ───────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`
   ╔══════════════════════════════════════════════╗
   ║         S I T R E P   O N L I N E           ║
@@ -522,3 +585,19 @@ app.listen(PORT, () => {
   pollCerts();
   setInterval(pollCerts, CERT_CHECK_INTERVAL);
 });
+
+// ── Graceful shutdown (K8s SIGTERM) ─────────────────────────────────────────
+function gracefulShutdown(signal) {
+  console.log(`[SITREP] ${signal} received — shutting down gracefully...`);
+  server.close(() => {
+    console.log("[SITREP] HTTP server closed. Goodbye.");
+    process.exit(0);
+  });
+  // Force exit after 10s if connections don't drain
+  setTimeout(() => {
+    console.error("[SITREP] Forced exit after timeout.");
+    process.exit(1);
+  }, 10_000);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

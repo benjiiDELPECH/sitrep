@@ -22,20 +22,23 @@
 
   <!-- HEADER -->
   <header>
-    <nav style="display:flex;align-items:center;gap:24px;padding:10px 0 6px 0;border-bottom:1.5px solid #1a2e1a;background:#101314;">
-      <span class="logo" style="font-size:22px;font-weight:bold;color:#00ff41;margin-left:18px;">◉ SITREP</span>
-      <a href="index.html" style="color:#fff;text-decoration:none;font-weight:bold;">Dashboard</a>
-      <a href="infra.html" style="color:#fff;text-decoration:none;font-weight:bold;">Cartographie</a>
-      <a href="#incidentLog" style="color:#fff;text-decoration:none;font-weight:bold;">Incidents</a>
-      <a href="#helpModal" onclick="document.getElementById('helpModal').classList.toggle('visible');return false;" style="color:#fff;text-decoration:none;font-weight:bold;">Aide</a>
-      <span style="flex:1"></span>
-      <span class="subtitle" style="color:#b0c4b0;font-size:13px;">TACTICAL OPS DASHBOARD v2.0 — CLASSIFICATION: UNCLASSIFIED</span>
-      <span style="margin-left:24px;color:#fff;">
-        <span class="clock" id="clock">--:--:--</span>
-        <span class="zulu" id="zulu" style="margin-left:10px;">-- --- ---- ZULU</span>
-      </span>
-    </nav>
+    <div class="header-left">
+      <div class="logo">◉ SITREP</div>
+      <div class="subtitle">TACTICAL OPS DASHBOARD v2.0 — CLASSIFICATION: UNCLASSIFIED</div>
+    </div>
+    <div class="header-right">
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="zulu" id="zulu">-- --- ---- ZULU</div>
+    </div>
   </header>
+
+  <!-- NAV -->
+  <nav style="display:flex;align-items:center;gap:18px;padding:4px 18px;background:#0d100d;border-bottom:1px solid #1a2e1a;font-size:12px;letter-spacing:1.5px;">
+    <a href="index.html" style="color:#00ff41;text-decoration:none;font-weight:bold;">▸ DASHBOARD</a>
+    <a href="infra.html" style="color:#b0c4b0;text-decoration:none;">▸ CARTOGRAPHIE</a>
+    <a href="#incidentLog" style="color:#b0c4b0;text-decoration:none;">▸ INCIDENTS</a>
+    <a href="#helpModal" onclick="document.getElementById('helpModal').classList.toggle('visible');return false;" style="color:#b0c4b0;text-decoration:none;">▸ AIDE</a>
+  </nav>
 
   <!-- STATUS BAR -->
   <div class="status-bar" id="statusBar">

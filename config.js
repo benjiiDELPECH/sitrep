@@ -123,10 +123,10 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
   {
     id: "rent-apply",
     name: "Rent Apply",
-    group: "FRONTENDS",
-    type: "vercel",
+    group: "RENT-APPLY",
+    type: "web",
     icon: "🏢",
-    url: "https://rent-apply.vercel.app",
+    url: "https://rent-apply.delpech.dev",
     timeout: 10000,
   },
   // benjamindelpech.dev — DNS not configured yet

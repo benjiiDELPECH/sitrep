@@ -33,7 +33,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:"],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", "https://api.real-estate-analytics.com"],
     },
   },
   crossOriginEmbedderPolicy: false, // Allow loading external fonts
@@ -80,6 +80,12 @@ const uptimeChecks = new Map(); // id → { up: number, total: number, since: IS
 // Intégration avec data-isolation-policy.md Decision Matrix
 const dbMetrics = new Map(); // app_id → { charge_pct, pool_pct, size_gb, incidents_90d, last_backup }
 const DB_METRICS_REFRESH = 5 * 60 * 1000; // 5min
+
+// ── ADEME DPE Enrichment Metrics ────────────────────────────────────────────
+// Proxied from ai-scraping-service /api/admin/ademe/*
+const ADEME_BACKEND_URL = process.env.ADEME_BACKEND_URL || "https://api.real-estate-analytics.com";
+const ademeStatsCache = { data: null, lastFetch: 0 };
+const ADEME_CACHE_TTL = 15_000; // 15s
 
 // ── Incident log (server-side, last 200 entries) ────────────────────────────
 const incidents = [];
@@ -491,6 +497,92 @@ app.get("/api/infra-graph", (_req, res) => {
     nodes,
     edges
   });
+});
+
+// ── API: Admin Dashboard Proxy ──────────────────────────────────────────────
+// Proxied from ai-scraping-service /api/admin/dashboard/*
+const dashboardCache = new Map(); // path → { data, ts }
+const DASHBOARD_CACHE_TTL = 10_000; // 10s
+
+app.get("/api/admin/dashboard/:endpoint", async (req, res) => {
+  const endpoint = req.params.endpoint;
+  const cacheKey = endpoint;
+  const now = Date.now();
+
+  // Cache check
+  const cached = dashboardCache.get(cacheKey);
+  if (cached && now - cached.ts < DASHBOARD_CACHE_TTL) {
+    return res.json(cached.data);
+  }
+
+  try {
+    const backendRes = await fetch(
+      `${ADEME_BACKEND_URL}/api/admin/dashboard/${endpoint}`,
+      {
+        headers: { "User-Agent": "SITREP/2.0" },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+    if (!backendRes.ok) throw new Error(`HTTP ${backendRes.status}`);
+
+    const data = await backendRes.json();
+    dashboardCache.set(cacheKey, { data, ts: now });
+    res.json(data);
+  } catch (err) {
+    console.error(`[SITREP] Dashboard ${endpoint} proxy failed: ${err.message}`);
+    if (cached) return res.json({ ...cached.data, stale: true });
+    res.status(502).json({ error: `Dashboard backend unreachable: ${endpoint}`, message: err.message });
+  }
+});
+
+// ── API: ADEME DPE Dashboard ────────────────────────────────────────────────
+app.get("/api/ademe/dashboard", async (_req, res) => {
+  try {
+    // Cache to avoid hammering the backend
+    const now = Date.now();
+    if (ademeStatsCache.data && now - ademeStatsCache.lastFetch < ADEME_CACHE_TTL) {
+      return res.json(ademeStatsCache.data);
+    }
+
+    const [statsRes, healthRes] = await Promise.all([
+      fetch(`${ADEME_BACKEND_URL}/api/admin/ademe/stats`, {
+        headers: { "User-Agent": "SITREP/2.0" },
+        signal: AbortSignal.timeout(8000),
+      }),
+      fetch(`${ADEME_BACKEND_URL}/api/admin/ademe/health`, {
+        headers: { "User-Agent": "SITREP/2.0" },
+        signal: AbortSignal.timeout(5000),
+      }),
+    ]);
+
+    if (!statsRes.ok) throw new Error(`Stats: HTTP ${statsRes.status}`);
+    if (!healthRes.ok) throw new Error(`Health: HTTP ${healthRes.status}`);
+
+    const stats = await statsRes.json();
+    const health = await healthRes.json();
+
+    const payload = {
+      ...stats,
+      health,
+      fetchedAt: new Date().toISOString(),
+    };
+
+    ademeStatsCache.data = payload;
+    ademeStatsCache.lastFetch = now;
+
+    res.json(payload);
+  } catch (err) {
+    console.error(`[SITREP] ADEME dashboard fetch failed: ${err.message}`);
+    // Return cached data if available, even if stale
+    if (ademeStatsCache.data) {
+      return res.json({ ...ademeStatsCache.data, stale: true });
+    }
+    res.status(502).json({
+      error: "ADEME backend unreachable",
+      message: err.message,
+      hint: `Check ${ADEME_BACKEND_URL}/api/admin/ademe/stats`,
+    });
+  }
 });
 
 // ── Database Isolation Policy Metrics ───────────────────────────────────────

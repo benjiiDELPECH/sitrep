@@ -712,6 +712,32 @@ main {
   color: var(--text-dim);
 }
 
+/* ── Admin Dashboard ───────────────────────────────────────────────────── */
+.card-body {
+  padding: 0;
+}
+
+.card-body .loading {
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 1px;
+  padding: 16px;
+  animation: pulse-loading 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-loading {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.card-body table tr:hover {
+  background: var(--bg-card-hover);
+}
+
+.card-body table tr:nth-child(even) {
+  background: rgba(0, 255, 65, 0.015);
+}
+
 /* ── Responsive ────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   header { flex-direction: column; gap: 8px; text-align: center; }

@@ -9,14 +9,29 @@
 const express = require("express");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
+const pinoHttp = require("pino-http");
 const path = require("path");
 const tls = require("tls");
 const net = require("net");
 const dns = require("dns");
 const { promisify } = require("util");
-const { TARGETS } = require("./config");
+const { TARGETS, APPS } = require("./config");
+const log = require("./lib/logger");
+const { loadIncidents, saveIncidents } = require("./lib/persistence");
 
 const dnsResolve4 = promisify(dns.resolve4);
+
+// ── Mode flags ──────────────────────────────────────────────────────────────
+const IS_DEV = process.env.NODE_ENV !== "production";
+const MOCK_MODE = process.env.MOCK_MODE === "true" || process.env.MOCK_MODE === "1";
+let firstPollDone = false; // for /readyz
+
+if (MOCK_MODE) {
+  log.warn("MOCK_MODE enabled — simulated health responses, no production polling");
+}
+
+// Lazy-load mock provider only when needed
+const mock = MOCK_MODE ? require("./lib/mock") : null;
 
 const app = express();
 app.set("trust proxy", 1); // Behind Traefik — required for rate limiting
@@ -25,6 +40,8 @@ const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || null;
 const CERT_EXPIRY_ALERT_DAYS = Number(process.env.CERT_EXPIRY_ALERT_DAYS) || 14;
 
 // ── Security hardening ──────────────────────────────────────────────────────
+// In dev: relax headers that break HTTP localhost (HSTS, upgrade-insecure, CORP)
+// In prod: full lockdown behind Traefik HTTPS
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -34,9 +51,14 @@ app.use(helmet({
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:"],
       connectSrc: ["'self'", "https://api.real-estate-analytics.com"],
+      ...(IS_DEV ? { frameAncestors: ["*"], upgradeInsecureRequests: null } : {}),
     },
   },
-  crossOriginEmbedderPolicy: false, // Allow loading external fonts
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: IS_DEV ? false : { policy: "same-origin" },
+  frameguard: IS_DEV ? false : undefined,
+  // HSTS on plain HTTP poisons Safari's cache → all sub-resources upgraded to HTTPS → fail
+  hsts: IS_DEV ? false : { maxAge: 31536000, includeSubDomains: true },
 }));
 
 // ── Rate limiting ───────────────────────────────────────────────────────────
@@ -56,14 +78,66 @@ const refreshLimiter = rateLimit({
   message: { error: "Refresh rate limited. Please wait." },
 });
 
-// ── Lightweight health probe (not rate-limited) ─────────────────────────────
+// ── Health & readiness probes (not rate-limited) ────────────────────────────
 app.get("/healthz", (_req, res) => res.json({ status: "ok" }));
+
+app.get("/readyz", (_req, res) => {
+  if (!firstPollDone) {
+    return res.status(503).json({ status: "not_ready", reason: "first poll not completed" });
+  }
+  res.json({ status: "ready", targets: cache.size, uptime: process.uptime() });
+});
+
+// ── Prometheus metrics (text/plain) ─────────────────────────────────────────
+app.get("/metrics", (_req, res) => {
+  const lines = [];
+  lines.push("# HELP sitrep_target_status Target status (1=operational, 0.5=degraded, 0=down)");
+  lines.push("# TYPE sitrep_target_status gauge");
+  lines.push("# HELP sitrep_target_latency_ms Target latency in milliseconds");
+  lines.push("# TYPE sitrep_target_latency_ms gauge");
+  lines.push("# HELP sitrep_target_uptime_ratio Target uptime ratio (0-1)");
+  lines.push("# TYPE sitrep_target_uptime_ratio gauge");
+  lines.push("# HELP sitrep_incidents_total Total incidents recorded");
+  lines.push("# TYPE sitrep_incidents_total counter");
+
+  for (const t of TARGETS) {
+    const check = cache.get(t.id);
+    const labels = `target="${t.id}",group="${t.group}"`;
+    const statusVal = check?.status === "OPERATIONAL" ? 1 : check?.status === "DEGRADED" ? 0.5 : 0;
+    lines.push(`sitrep_target_status{${labels}} ${statusVal}`);
+    lines.push(`sitrep_target_latency_ms{${labels}} ${check?.latency || 0}`);
+    const ut = uptimeChecks.get(t.id);
+    const ratio = ut && ut.total > 0 ? (ut.up / ut.total).toFixed(4) : 0;
+    lines.push(`sitrep_target_uptime_ratio{${labels}} ${ratio}`);
+  }
+  lines.push(`sitrep_incidents_total ${incidents.length}`);
+  lines.push(`sitrep_poll_interval_seconds ${POLL_INTERVAL / 1000}`);
+  lines.push(`sitrep_mock_mode ${MOCK_MODE ? 1 : 0}`);
+
+  res.set("Content-Type", "text/plain; version=0.0.4");
+  res.send(lines.join("\n") + "\n");
+});
 
 app.use("/api/", apiLimiter);
 app.use("/api/status/refresh", refreshLimiter);
 
 app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
+
+// ── Request logging ─────────────────────────────────────────────────────────
+app.use(pinoHttp({
+  logger: log,
+  autoLogging: {
+    ignore: (req) => {
+      // Don't log static files and health probes
+      return req.url.startsWith("/style") || req.url.startsWith("/app")
+        || req.url === "/healthz" || req.url === "/readyz"
+        || req.url.endsWith(".css") || req.url.endsWith(".js")
+        || req.url.endsWith(".json") || req.url.endsWith(".html");
+    },
+  },
+  customLogLevel: (_req, res) => res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info",
+}));
 
 // ── Health check cache ──────────────────────────────────────────────────────
 const cache = new Map();
@@ -81,15 +155,10 @@ const uptimeChecks = new Map(); // id → { up: number, total: number, since: IS
 const dbMetrics = new Map(); // app_id → { charge_pct, pool_pct, size_gb, incidents_90d, last_backup }
 const DB_METRICS_REFRESH = 5 * 60 * 1000; // 5min
 
-// ── ADEME DPE Enrichment Metrics ────────────────────────────────────────────
-// Proxied from ai-scraping-service /api/admin/ademe/*
-const ADEME_BACKEND_URL = process.env.ADEME_BACKEND_URL || "https://api.real-estate-analytics.com";
-const ademeStatsCache = { data: null, lastFetch: 0 };
-const ADEME_CACHE_TTL = 15_000; // 15s
-
-// ── Incident log (server-side, last 200 entries) ────────────────────────────
-const incidents = [];
+// ── Incident log (persistent, file-backed) ─────────────────────────────────
+const incidents = loadIncidents();
 const MAX_INCIDENTS = 200;
+let _incidentSaveTimer = null;
 
 function addIncident(target, from, to) {
   const entry = {
@@ -104,8 +173,18 @@ function addIncident(target, from, to) {
   incidents.unshift(entry);
   if (incidents.length > MAX_INCIDENTS) incidents.pop();
 
+  log.warn({ target: target.id, from, to, group: target.group }, `Status transition: ${from} → ${to}`);
+
+  // Debounced save to disk (avoid thrashing on burst of transitions)
+  if (_incidentSaveTimer) clearTimeout(_incidentSaveTimer);
+  _incidentSaveTimer = setTimeout(() => saveIncidents(incidents), 2000);
+
   // Discord webhook
-  if (DISCORD_WEBHOOK) sendDiscordAlert(entry).catch(() => {});
+  if (DISCORD_WEBHOOK) {
+    sendDiscordAlert(entry).catch((err) => {
+      log.error({ err: err.message, target: target.id }, "Discord webhook failed");
+    });
+  }
 }
 
 // ── Discord webhook ─────────────────────────────────────────────────────────
@@ -172,10 +251,10 @@ async function pollCerts() {
   )];
 
   for (const h of hostnames) {
-    const info = await checkCert(h);
+    const info = MOCK_MODE ? mock.mockCheckCert(h) : await checkCert(h);
     if (info) certCache.set(h, info);
   }
-  console.log(`[SITREP] SSL certs checked: ${certCache.size} certs`);
+  log.info({ count: certCache.size }, "SSL certs checked");
 
   // ── Cert expiry alerts ──
   if (DISCORD_WEBHOOK) {
@@ -186,6 +265,8 @@ async function pollCerts() {
         const lastBracket = certAlertSent.get(hostname);
         if (lastBracket === bracket) continue;
         certAlertSent.set(hostname, bracket);
+
+        log.warn({ hostname, daysLeft: info.daysLeft, validTo: info.validTo }, "SSL cert expiring soon");
 
         const color = info.daysLeft <= 1 ? 0xff0000 : info.daysLeft <= 3 ? 0xff3333 : info.daysLeft <= 7 ? 0xffaa00 : 0xffcc00;
         const emoji = info.daysLeft <= 3 ? "🚨" : "⚠️";
@@ -208,7 +289,9 @@ async function pollCerts() {
               timestamp: new Date().toISOString(),
             }],
           }),
-        }).catch(() => {});
+        }).catch((err) => {
+          log.error({ err: err.message, hostname }, "Discord cert alert webhook failed");
+        });
       }
     }
   }
@@ -355,7 +438,8 @@ async function checkTarget(target) {
 }
 
 async function pollAll() {
-  const results = await Promise.allSettled(TARGETS.map((t) => checkTarget(t)));
+  const checkFn = MOCK_MODE ? (t) => Promise.resolve(mock.mockCheckTarget(t)) : checkTarget;
+  const results = await Promise.allSettled(TARGETS.map(checkFn));
 
   for (const r of results) {
     if (r.status !== "fulfilled") continue;
@@ -384,6 +468,7 @@ async function pollAll() {
     ut.total++;
     if (val.status === "OPERATIONAL") ut.up++;
   }
+  firstPollDone = true;
 }
 
 // ── API ─────────────────────────────────────────────────────────────────────
@@ -499,17 +584,38 @@ app.get("/api/infra-graph", (_req, res) => {
   });
 });
 
-// ── API: Admin Dashboard Proxy ──────────────────────────────────────────────
-// Proxied from ai-scraping-service /api/admin/dashboard/*
-const dashboardCache = new Map(); // path → { data, ts }
+// ── API: Multi-App Registry ─────────────────────────────────────────────────
+// Returns the list of registered apps (sans backendUrl for security)
+const appsIndex = new Map(APPS.map((a) => [a.id, a]));
+
+app.get("/api/apps", (_req, res) => {
+  const apps = APPS.map(({ backendUrl, ...rest }) => rest);
+  res.json({ apps, timestamp: new Date().toISOString() });
+});
+
+// ── API: Multi-App Dashboard Proxy ──────────────────────────────────────────
+// Generic proxy: /api/apps/:appId/dashboard/:endpoint
+// Routes to the app's backendUrl + /api/admin/dashboard/:endpoint
+const dashboardCache = new Map(); // "appId:endpoint" → { data, ts }
 const DASHBOARD_CACHE_TTL = 10_000; // 10s
 
-app.get("/api/admin/dashboard/:endpoint", async (req, res) => {
-  const endpoint = req.params.endpoint;
-  const cacheKey = endpoint;
+app.get("/api/apps/:appId/dashboard/:endpoint", async (req, res) => {
+  const { appId, endpoint } = req.params;
+  const appConfig = appsIndex.get(appId);
+
+  if (!appConfig) {
+    return res.status(404).json({ error: `Unknown app: ${appId}` });
+  }
+  if (!appConfig.dashboard) {
+    return res.status(404).json({ error: `App ${appId} has no business dashboard configured` });
+  }
+  if (!appConfig.dashboard.endpoints.includes(endpoint)) {
+    return res.status(404).json({ error: `Endpoint '${endpoint}' not available for ${appId}` });
+  }
+
+  const cacheKey = `${appId}:${endpoint}`;
   const now = Date.now();
 
-  // Cache check
   const cached = dashboardCache.get(cacheKey);
   if (cached && now - cached.ts < DASHBOARD_CACHE_TTL) {
     return res.json(cached.data);
@@ -517,7 +623,7 @@ app.get("/api/admin/dashboard/:endpoint", async (req, res) => {
 
   try {
     const backendRes = await fetch(
-      `${ADEME_BACKEND_URL}/api/admin/dashboard/${endpoint}`,
+      `${appConfig.backendUrl}/api/admin/dashboard/${endpoint}`,
       {
         headers: { "User-Agent": "SITREP/2.0" },
         signal: AbortSignal.timeout(10000),
@@ -529,27 +635,42 @@ app.get("/api/admin/dashboard/:endpoint", async (req, res) => {
     dashboardCache.set(cacheKey, { data, ts: now });
     res.json(data);
   } catch (err) {
-    console.error(`[SITREP] Dashboard ${endpoint} proxy failed: ${err.message}`);
+    log.error({ err: err.message, app: appId, endpoint }, "Dashboard proxy failed");
     if (cached) return res.json({ ...cached.data, stale: true });
-    res.status(502).json({ error: `Dashboard backend unreachable: ${endpoint}`, message: err.message });
+    res.status(502).json({
+      error: `${appConfig.name} backend unreachable: ${endpoint}`,
+      message: err.message,
+    });
   }
 });
 
-// ── API: ADEME DPE Dashboard ────────────────────────────────────────────────
-app.get("/api/ademe/dashboard", async (_req, res) => {
-  try {
-    // Cache to avoid hammering the backend
-    const now = Date.now();
-    if (ademeStatsCache.data && now - ademeStatsCache.lastFetch < ADEME_CACHE_TTL) {
-      return res.json(ademeStatsCache.data);
-    }
+// ── API: Multi-App ADEME Proxy ──────────────────────────────────────────────
+// Only for apps with dashboard.ademe = true
+const ademeCache = new Map(); // appId → { data, ts }
+const ADEME_CACHE_TTL = 15_000; // 15s
 
+app.get("/api/apps/:appId/ademe", async (req, res) => {
+  const { appId } = req.params;
+  const appConfig = appsIndex.get(appId);
+
+  if (!appConfig) return res.status(404).json({ error: `Unknown app: ${appId}` });
+  if (!appConfig.dashboard?.ademe) {
+    return res.status(404).json({ error: `App ${appId} has no ADEME integration` });
+  }
+
+  const now = Date.now();
+  const cached = ademeCache.get(appId);
+  if (cached && now - cached.ts < ADEME_CACHE_TTL) {
+    return res.json(cached.data);
+  }
+
+  try {
     const [statsRes, healthRes] = await Promise.all([
-      fetch(`${ADEME_BACKEND_URL}/api/admin/ademe/stats`, {
+      fetch(`${appConfig.backendUrl}/api/admin/ademe/stats`, {
         headers: { "User-Agent": "SITREP/2.0" },
         signal: AbortSignal.timeout(8000),
       }),
-      fetch(`${ADEME_BACKEND_URL}/api/admin/ademe/health`, {
+      fetch(`${appConfig.backendUrl}/api/admin/ademe/health`, {
         headers: { "User-Agent": "SITREP/2.0" },
         signal: AbortSignal.timeout(5000),
       }),
@@ -561,28 +682,50 @@ app.get("/api/ademe/dashboard", async (_req, res) => {
     const stats = await statsRes.json();
     const health = await healthRes.json();
 
-    const payload = {
-      ...stats,
-      health,
-      fetchedAt: new Date().toISOString(),
-    };
-
-    ademeStatsCache.data = payload;
-    ademeStatsCache.lastFetch = now;
-
+    const payload = { ...stats, health, fetchedAt: new Date().toISOString() };
+    ademeCache.set(appId, { data: payload, ts: now });
     res.json(payload);
   } catch (err) {
-    console.error(`[SITREP] ADEME dashboard fetch failed: ${err.message}`);
-    // Return cached data if available, even if stale
-    if (ademeStatsCache.data) {
-      return res.json({ ...ademeStatsCache.data, stale: true });
-    }
+    log.error({ err: err.message, app: appId }, "ADEME proxy failed");
+    if (cached) return res.json({ ...cached.data, stale: true });
     res.status(502).json({
-      error: "ADEME backend unreachable",
+      error: `${appConfig.name} ADEME backend unreachable`,
       message: err.message,
-      hint: `Check ${ADEME_BACKEND_URL}/api/admin/ademe/stats`,
     });
   }
+});
+
+// ── API: App Health Summary (from SITREP monitoring data) ───────────────────
+// Returns health status for a given app's targets group
+app.get("/api/apps/:appId/health", (req, res) => {
+  const { appId } = req.params;
+  const appConfig = appsIndex.get(appId);
+  if (!appConfig) return res.status(404).json({ error: `Unknown app: ${appId}` });
+
+  // Find targets matching this app's group
+  const groupTargets = TARGETS.filter((t) => t.group === appConfig.group);
+  const healthData = groupTargets.map((t) => {
+    const cached = cache.get(t.id);
+    const history = latencyHistory.get(t.id) || [];
+    const uptime = uptimeChecks.get(t.id);
+    return {
+      id: t.id,
+      name: t.name,
+      icon: t.icon,
+      status: cached?.status || "UNKNOWN",
+      latency: cached?.latency || null,
+      httpCode: cached?.httpCode || null,
+      lastCheck: cached?.lastCheck || null,
+      latencyHistory: history,
+      uptime: uptime ? ((uptime.up / uptime.total) * 100).toFixed(2) : null,
+    };
+  });
+
+  res.json({
+    app: { id: appConfig.id, name: appConfig.name, icon: appConfig.icon },
+    targets: healthData,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ── Database Isolation Policy Metrics ───────────────────────────────────────
@@ -619,9 +762,9 @@ async function pollDatabaseMetrics() {
       updated_at: new Date().toISOString(),
     });
 
-    console.log(`[SITREP] Database metrics updated: ${dbMetrics.size} apps`);
+    log.info({ count: dbMetrics.size }, "Database metrics updated");
   } catch (err) {
-    console.error(`[SITREP] Failed to fetch database metrics: ${err.message}`);
+    log.error({ err: err.message }, "Failed to fetch database metrics");
   }
 }
 
@@ -658,17 +801,26 @@ function evaluateDecisionMatrix(data) {
   };
 }
 
+// ── Global error handlers (no more silent crashes) ─────────────────────────
+process.on("unhandledRejection", (reason, promise) => {
+  log.error({ err: reason?.message || reason, stack: reason?.stack }, "Unhandled promise rejection");
+});
+
+process.on("uncaughtException", (err) => {
+  log.fatal({ err: err.message, stack: err.stack }, "Uncaught exception — shutting down");
+  process.exit(1);
+});
+
 // ── Start ───────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => {
-  console.log(`
-  ╔══════════════════════════════════════════════╗
-  ║         S I T R E P   O N L I N E           ║
-  ║     Tactical Ops Dashboard v2.0.0           ║
-  ║     http://localhost:${PORT}                   ║
-  ╚══════════════════════════════════════════════╝
-  `);
-  console.log(`[SITREP] Monitoring ${TARGETS.length} targets every ${POLL_INTERVAL / 1000}s`);
-  if (DISCORD_WEBHOOK) console.log("[SITREP] Discord webhook: ACTIVE");
+  log.info({
+    port: PORT,
+    targets: TARGETS.length,
+    pollInterval: `${POLL_INTERVAL / 1000}s`,
+    mockMode: MOCK_MODE,
+    dev: IS_DEV,
+    discord: !!DISCORD_WEBHOOK,
+  }, `SITREP v2.1 online — http://localhost:${PORT}`);
 
   pollAll();
   setInterval(pollAll, POLL_INTERVAL);
@@ -680,14 +832,16 @@ const server = app.listen(PORT, () => {
 
 // ── Graceful shutdown (K8s SIGTERM) ─────────────────────────────────────────
 function gracefulShutdown(signal) {
-  console.log(`[SITREP] ${signal} received — shutting down gracefully...`);
+  log.info({ signal }, "Shutting down gracefully...");
+  // Persist incidents before exit
+  saveIncidents(incidents);
   server.close(() => {
-    console.log("[SITREP] HTTP server closed. Goodbye.");
+    log.info("HTTP server closed. Goodbye.");
     process.exit(0);
   });
   // Force exit after 10s if connections don't drain
   setTimeout(() => {
-    console.error("[SITREP] Forced exit after timeout.");
+    log.error("Forced exit after timeout");
     process.exit(1);
   }, 10_000);
 }

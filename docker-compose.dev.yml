@@ -1,0 +1,68 @@
+# =============================================================================
+# SITREP — Local Development Stack
+# =============================================================================
+# One-click local setup with mock targets.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up --build
+#   → http://localhost:3333
+#
+# What it runs:
+#   - SITREP dashboard (mock mode — no production polling)
+#   - 3 fake targets (nginx containers) simulating real services
+#
+# Mock mode simulates random UP/DOWN/DEGRADED states so you can see
+# the dashboard behavior, transitions, alerts, and incident log without
+# needing any real production infrastructure.
+# =============================================================================
+
+services:
+  # ── SITREP Dashboard ──────────────────────────────────────────────────────
+  sitrep:
+    build: .
+    ports:
+      - "3333:3333"
+    environment:
+      - NODE_ENV=development
+      - MOCK_MODE=true
+      - POLL_INTERVAL=5000     # 5s for fast feedback in dev
+      - LOG_LEVEL=debug
+    volumes:
+      # Persist incident data across restarts
+      - sitrep-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3333/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Fake Targets (optional — used if you switch off MOCK_MODE) ───────────
+  # These simulate real services that SITREP can poll locally.
+  fake-api:
+    image: nginx:alpine
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 5s
+      timeout: 2s
+
+  fake-frontend:
+    image: nginx:alpine
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 5s
+      timeout: 2s
+
+  # Simulate a flaky service (randomly stops responding)
+  fake-flaky:
+    image: nginx:alpine
+    deploy:
+      resources:
+        limits:
+          memory: 16M  # Tight memory = occasional OOMKills = realistic failures
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 5s
+      timeout: 2s
+
+volumes:
+  sitrep-data:

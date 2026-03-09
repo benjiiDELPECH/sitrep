@@ -18,6 +18,7 @@ const { promisify } = require("util");
 const { TARGETS, APPS } = require("./config");
 const log = require("./lib/logger");
 const { loadIncidents, saveIncidents } = require("./lib/persistence");
+const geoip = require("geoip-lite");
 
 const dnsResolve4 = promisify(dns.resolve4);
 
@@ -139,6 +140,63 @@ app.use(pinoHttp({
   customLogLevel: (_req, res) => res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info",
 }));
 
+// ── Inbound request tracing ─────────────────────────────────────────────────
+app.use((req, res, next) => {
+  const start = Date.now();
+  // Skip SSE stream and static assets from tracing
+  if (req.url === "/api/events/stream" || req.url === "/healthz" || req.url === "/readyz") return next();
+  const isStatic = /\.(css|js|json|html|ico|png|svg|woff2?)$/.test(req.url);
+
+  res.on("finish", () => {
+    const latency = Date.now() - start;
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim()
+            || req.headers["x-real-ip"]
+            || req.socket.remoteAddress || "unknown";
+    const ua = req.headers["user-agent"] || "unknown";
+    const uaShort = ua.length > 60 ? ua.substring(0, 57) + "…" : ua;
+
+    // Always count in traffic stats
+    trafficStats.inbound.total++;
+    trafficStats.inbound.perPath[req.url] = (trafficStats.inbound.perPath[req.url] || 0) + 1;
+    trafficStats.inbound.perIP[ip] = (trafficStats.inbound.perIP[ip] || 0) + 1;
+    trafficStats.inbound.perUA[uaShort] = (trafficStats.inbound.perUA[uaShort] || 0) + 1;
+
+    // ── IP Intelligence enrichment ──
+    const ipRec = getIPRecord(ip);
+    ipRec.hits++;
+    ipRec.lastSeen = new Date().toISOString();
+    ipRec.paths[req.url] = (ipRec.paths[req.url] || 0) + 1;
+    ipRec.methods[req.method] = (ipRec.methods[req.method] || 0) + 1;
+    ipRec.statuses[res.statusCode] = (ipRec.statuses[res.statusCode] || 0) + 1;
+    if (!ipRec.userAgents.includes(uaShort) && ipRec.userAgents.length < 5) ipRec.userAgents.push(uaShort);
+    const threat = scoreThreat(ipRec, req);
+
+    // Country stats
+    if (ipRec.country) {
+      if (!countryStats[ipRec.country]) countryStats[ipRec.country] = { hits: 0, ips: new Set(), lastSeen: null, flag: ipRec.countryFlag };
+      countryStats[ipRec.country].hits++;
+      countryStats[ipRec.country].lastSeen = ipRec.lastSeen;
+    }
+
+    // Emit event only for API calls (not static files — too noisy)
+    if (!isStatic) {
+      const sev = threat.score >= 4 ? "critical" : res.statusCode >= 500 ? "critical" : res.statusCode >= 400 ? "warn" : "info";
+      emitEvent("REQUEST_IN", sev, null,
+        `← ${req.method} ${req.url} ${res.statusCode} ${latency}ms [${ipRec.countryFlag} ${ip}${ipRec.city ? ' ' + ipRec.city : ''}]`,
+        {
+          method: req.method, path: req.url, status: res.statusCode, latency, ip, ua: uaShort, isStatic,
+          // Geo enrichment
+          country: ipRec.country, countryFlag: ipRec.countryFlag, city: ipRec.city,
+          region: ipRec.region, timezone: ipRec.timezone, ll: ipRec.ll,
+          // Threat
+          threatScore: ipRec.threatScore, threatReasons: ipRec.threatReasons,
+          hits: ipRec.hits, honeypotHits: ipRec.honeypotHits,
+        });
+    }
+  });
+  next();
+});
+
 // ── Health check cache ──────────────────────────────────────────────────────
 const cache = new Map();
 const POLL_INTERVAL = Number(process.env.POLL_INTERVAL) || 30_000;
@@ -160,6 +218,248 @@ const incidents = loadIncidents();
 const MAX_INCIDENTS = 200;
 let _incidentSaveTimer = null;
 
+// ── Real-time Event Bus (SSE) ───────────────────────────────────────────────
+const eventBuffer = [];        // circular buffer — last N events
+const EVENT_BUFFER_SIZE = 300;
+const sseClients = new Set();  // active SSE connections
+let eventSeq = 0;              // monotonic event sequence
+
+// ── Traffic Intelligence ────────────────────────────────────────────────────
+const trafficStats = {
+  inbound: { total: 0, perPath: {}, perIP: {}, perUA: {}, history: [] },   // rolling 1min windows
+  outbound: { total: 0, perTarget: {}, history: [] },
+  startedAt: new Date().toISOString(),
+};
+const TRAFFIC_WINDOW = 60_000; // 1 minute windows
+let _trafficWindowTimer = null;
+
+// ── IP Intelligence Registry (Honeypot) ─────────────────────────────────────
+// Every IP that touches the cluster is tracked permanently (in-memory, reset on restart).
+// Enriched with GeoIP (country, city, coords), threat scoring, behavioral analysis.
+const ipRegistry = new Map(); // ip → IPRecord
+const countryStats = {};       // country_code → { hits, ips: Set, lastSeen }
+const THREAT_DECAY_MS = 30 * 60 * 1000; // threat score decays after 30min inactivity
+
+// Country code → flag emoji
+function countryFlag(cc) {
+  if (!cc || cc.length !== 2) return '🌐';
+  return String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1E6 - 65 + c.charCodeAt(0)));
+}
+
+// Known bad User-Agent patterns (scanners, bots, exploit tools)
+const THREAT_UA_PATTERNS = [
+  /nmap/i, /nikto/i, /sqlmap/i, /dirbust/i, /gobust/i, /wfuzz/i,
+  /hydra/i, /masscan/i, /zgrab/i, /censys/i, /shodan/i,
+  /nuclei/i, /jaeles/i, /burp/i, /owasp/i, /metasploit/i,
+  /python-requests/i, /go-http-client/i, /curl\//i,
+  /bot.*scan/i, /scan.*bot/i, /crawl/i, /spider/i,
+  /wget/i, /libwww/i, /lwp-trivial/i,
+];
+
+// Suspicious path patterns (honeypot triggers)
+const HONEYPOT_PATHS = [
+  /\.env/i, /wp-admin/i, /wp-login/i, /wordpress/i, /phpmyadmin/i,
+  /\.git\//i, /\.svn/i, /\.DS_Store/i, /xmlrpc\.php/i,
+  /actuator(?!\/health)/i, /admin\/config/i, /\.aws/i,
+  /shell|cmd|exec|eval/i, /etc\/passwd/i, /\.well-known\/security/i,
+  /backup|dump|database/i, /config\.json|secrets/i,
+  /\.(sql|bak|old|swp|zip|tar|gz)$/i,
+];
+
+function getIPRecord(ip) {
+  if (ipRegistry.has(ip)) return ipRegistry.get(ip);
+  // GeoIP lookup
+  const geo = geoip.lookup(ip) || null;
+  const record = {
+    ip,
+    firstSeen: new Date().toISOString(),
+    lastSeen: new Date().toISOString(),
+    hits: 0,
+    paths: {},         // path → count
+    methods: {},       // method → count
+    statuses: {},      // status_code → count
+    userAgents: [],    // unique UAs seen (max 5)
+    // GeoIP
+    country: geo?.country || null,
+    countryFlag: countryFlag(geo?.country),
+    city: geo?.city || null,
+    region: geo?.region || null,
+    timezone: geo?.timezone || null,
+    ll: geo?.ll || null,
+    eu: geo?.eu === '1',
+    // Threat
+    threatScore: 0,    // 0=clean, 1-3=suspicious, 4+=hostile
+    threatReasons: [], // why the score is high
+    isScanner: false,
+    isBotUA: false,
+    honeypotHits: 0,   // how many honeypot paths triggered
+    rateBurst: 0,      // requests in last 60s
+    rateHistory: [],   // timestamps of recent requests (last 60 entries)
+    blocked: false,
+  };
+  ipRegistry.set(ip, record);
+
+  // Track country stats
+  if (record.country) {
+    if (!countryStats[record.country]) {
+      countryStats[record.country] = { hits: 0, ips: new Set(), lastSeen: null, flag: record.countryFlag };
+    }
+    countryStats[record.country].ips.add(ip);
+  }
+  return record;
+}
+
+function scoreThreat(record, req) {
+  const reasons = [];
+  let score = 0;
+  const ua = req.headers['user-agent'] || '';
+  const path = req.url;
+
+  // 1. Bad UA detection
+  if (THREAT_UA_PATTERNS.some(p => p.test(ua))) {
+    score += 3;
+    reasons.push('SCANNER_UA');
+    record.isScanner = true;
+  }
+  if (!ua || ua === 'unknown' || ua.length < 10) {
+    score += 1;
+    reasons.push('EMPTY_UA');
+  }
+
+  // 2. Honeypot path
+  if (HONEYPOT_PATHS.some(p => p.test(path))) {
+    score += 4;
+    reasons.push('HONEYPOT_PATH');
+    record.honeypotHits++;
+  }
+
+  // 3. Rate burst (>30 req in 60s)
+  const now = Date.now();
+  record.rateHistory.push(now);
+  record.rateHistory = record.rateHistory.filter(t => now - t < 60000);
+  record.rateBurst = record.rateHistory.length;
+  if (record.rateBurst > 30) {
+    score += 2;
+    reasons.push('RATE_BURST');
+  } else if (record.rateBurst > 60) {
+    score += 4;
+    reasons.push('RATE_FLOOD');
+  }
+
+  // 4. 4xx accumulation (probing)
+  const total4xx = Object.entries(record.statuses)
+    .filter(([code]) => code >= 400 && code < 500)
+    .reduce((sum, [, count]) => sum + count, 0);
+  if (total4xx > 10) {
+    score += 2;
+    reasons.push('PROBE_4XX');
+  }
+
+  // 5. Path diversity (scanning many different paths)
+  if (Object.keys(record.paths).length > 15) {
+    score += 2;
+    reasons.push('PATH_SCAN');
+  }
+
+  // Apply score (max of current + new, with some decay)
+  record.threatScore = Math.max(record.threatScore, score);
+  for (const r of reasons) {
+    if (!record.threatReasons.includes(r)) record.threatReasons.push(r);
+  }
+
+  return { score, reasons };
+}
+
+// Periodic threat alert to Discord (check every 60s)
+let _threatAlertTimer = null;
+const _alertedIPs = new Set(); // already alerted this session
+
+function checkThreatAlerts() {
+  if (!DISCORD_WEBHOOK) return;
+  for (const [ip, record] of ipRegistry) {
+    if (record.threatScore >= 4 && !_alertedIPs.has(ip)) {
+      _alertedIPs.add(ip);
+      const flag = record.countryFlag || '🌐';
+      const city = record.city || '?';
+      const country = record.country || '??';
+      log.warn({ ip, threat: record.threatScore, reasons: record.threatReasons, country, city },
+        `THREAT DETECTED: ${ip} (${flag} ${country}/${city}) — score ${record.threatScore}`);
+
+      emitEvent('THREAT', 'critical', null,
+        `🚨 THREAT ${flag} ${ip} (${country}/${city}) — score ${record.threatScore} [${record.threatReasons.join(',')}]`,
+        { ip, country, city, flag: record.countryFlag, score: record.threatScore, reasons: record.threatReasons, hits: record.hits });
+
+      // Discord
+      fetch(DISCORD_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: record.threatScore >= 6 ? '@here' : undefined,
+          embeds: [{
+            title: `🚨 Threat Detected — ${flag} ${ip}`,
+            color: record.threatScore >= 6 ? 0xff0000 : 0xff6600,
+            fields: [
+              { name: 'Location', value: `${flag} ${country} / ${city}`, inline: true },
+              { name: 'Threat Score', value: `${record.threatScore}/10`, inline: true },
+              { name: 'Hits', value: `${record.hits}`, inline: true },
+              { name: 'Reasons', value: record.threatReasons.join(', ') },
+              { name: 'User-Agents', value: record.userAgents.slice(0, 3).join('\n') || 'none' },
+              { name: 'Top Paths', value: Object.entries(record.paths).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([p, c]) => `${p} (${c}×)`).join('\n') || 'none' },
+            ],
+            footer: { text: 'SITREP — Honeypot Intelligence' },
+            timestamp: new Date().toISOString(),
+          }],
+        }),
+      }).catch(err => log.error({ err: err.message, ip }, 'Threat Discord alert failed'));
+    }
+  }
+}
+_threatAlertTimer = setInterval(checkThreatAlerts, 60_000);
+
+function rotateTrafficWindow() {
+  const now = new Date().toISOString();
+  trafficStats.inbound.history.push({
+    ts: now, count: trafficStats.inbound.total,
+    topPaths: { ...trafficStats.inbound.perPath },
+    topIPs: { ...trafficStats.inbound.perIP },
+  });
+  trafficStats.outbound.history.push({
+    ts: now, count: trafficStats.outbound.total,
+    perTarget: { ...trafficStats.outbound.perTarget },
+  });
+  // Keep last 30 windows (30 min)
+  if (trafficStats.inbound.history.length > 30) trafficStats.inbound.history.shift();
+  if (trafficStats.outbound.history.length > 30) trafficStats.outbound.history.shift();
+  // Reset counters for next window
+  trafficStats.inbound.total = 0;
+  trafficStats.inbound.perPath = {};
+  trafficStats.inbound.perIP = {};
+  trafficStats.inbound.perUA = {};
+  trafficStats.outbound.total = 0;
+  trafficStats.outbound.perTarget = {};
+}
+_trafficWindowTimer = setInterval(rotateTrafficWindow, TRAFFIC_WINDOW);
+
+function emitEvent(type, severity, target, message, data = {}) {
+  const evt = {
+    seq: ++eventSeq,
+    ts: new Date().toISOString(),
+    type,       // HEALTH_CHECK | STATUS_CHANGE | CERT_CHECK | INCIDENT | STARTUP | POLL_CYCLE | REQUEST_IN | REQUEST_OUT | THREAT
+    severity,   // info | warn | critical | ok
+    target,     // target id or null
+    message,
+    data,
+  };
+  eventBuffer.push(evt);
+  if (eventBuffer.length > EVENT_BUFFER_SIZE) eventBuffer.shift();
+
+  // Push to all SSE clients
+  const payload = `data: ${JSON.stringify(evt)}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(payload); } catch { sseClients.delete(client); }
+  }
+}
+
 function addIncident(target, from, to) {
   const entry = {
     id: target.id,
@@ -174,6 +474,12 @@ function addIncident(target, from, to) {
   if (incidents.length > MAX_INCIDENTS) incidents.pop();
 
   log.warn({ target: target.id, from, to, group: target.group }, `Status transition: ${from} → ${to}`);
+
+  // Emit to event bus
+  const sev = to === "DOWN" ? "critical" : to === "DEGRADED" ? "warn" : "ok";
+  emitEvent("STATUS_CHANGE", sev, target.id,
+    `${target.icon || "●"} ${target.name}: ${from} → ${to}`,
+    { from, to, group: target.group, icon: target.icon, name: target.name });
 
   // Debounced save to disk (avoid thrashing on burst of transitions)
   if (_incidentSaveTimer) clearTimeout(_incidentSaveTimer);
@@ -252,7 +558,13 @@ async function pollCerts() {
 
   for (const h of hostnames) {
     const info = MOCK_MODE ? mock.mockCheckCert(h) : await checkCert(h);
-    if (info) certCache.set(h, info);
+    if (info) {
+      certCache.set(h, info);
+      const sev = info.daysLeft <= 7 ? "critical" : info.daysLeft <= 30 ? "warn" : "info";
+      emitEvent("CERT_CHECK", sev, h,
+        `🔒 ${h} — ${info.daysLeft}d left (${info.issuer})`,
+        { hostname: h, daysLeft: info.daysLeft, issuer: info.issuer, validTo: info.validTo });
+    }
   }
   log.info({ count: certCache.size }, "SSL certs checked");
 
@@ -409,6 +721,14 @@ async function checkTarget(target) {
       }
     }
 
+    // Emit outbound request event
+    trafficStats.outbound.total++;
+    trafficStats.outbound.perTarget[target.id] = (trafficStats.outbound.perTarget[target.id] || 0) + 1;
+    emitEvent("REQUEST_OUT", status === "OPERATIONAL" ? "info" : status === "DEGRADED" ? "warn" : "critical",
+      target.id,
+      `→ GET ${target.url} ${res.status} ${latency}ms`,
+      { method: "GET", url: target.url, status: res.status, latency, targetId: target.id, targetStatus: status });
+
     return {
       id: target.id, status, httpCode: res.status, latency, details, components,
       lastCheck: new Date().toISOString(), error, diagnosis,
@@ -427,6 +747,13 @@ async function checkTarget(target) {
       }
     } catch { /* diagnosis itself failed, keep original error */ }
 
+    // Emit outbound request event (failure)
+    trafficStats.outbound.total++;
+    trafficStats.outbound.perTarget[target.id] = (trafficStats.outbound.perTarget[target.id] || 0) + 1;
+    emitEvent("REQUEST_OUT", "critical", target.id,
+      `→ GET ${target.url} FAIL ${latency}ms (${errorCode})`,
+      { method: "GET", url: target.url, status: null, latency, targetId: target.id, targetStatus: "DOWN", error: errorCode });
+
     return {
       id: target.id, status: "DOWN", httpCode: null,
       latency, details: null, components: null,
@@ -440,6 +767,8 @@ async function checkTarget(target) {
 async function pollAll() {
   const checkFn = MOCK_MODE ? (t) => Promise.resolve(mock.mockCheckTarget(t)) : checkTarget;
   const results = await Promise.allSettled(TARGETS.map(checkFn));
+
+  let up = 0, deg = 0, down = 0;
 
   for (const r of results) {
     if (r.status !== "fulfilled") continue;
@@ -467,8 +796,25 @@ async function pollAll() {
     const ut = uptimeChecks.get(val.id);
     ut.total++;
     if (val.status === "OPERATIONAL") ut.up++;
+
+    // Emit individual HEALTH_CHECK event
+    const target = TARGETS.find((t) => t.id === val.id);
+    const sev = val.status === "DOWN" ? "critical" : val.status === "DEGRADED" ? "warn" : "info";
+    emitEvent("HEALTH_CHECK", sev, val.id,
+      `${target?.icon || "●"} ${target?.name || val.id} → ${val.status} (${val.latency || "?"}ms, HTTP ${val.httpCode || "—"})`,
+      { status: val.status, latency: val.latency, httpCode: val.httpCode, error: val.error, group: target?.group });
+
+    if (val.status === "OPERATIONAL") up++;
+    else if (val.status === "DEGRADED") deg++;
+    else down++;
   }
   firstPollDone = true;
+
+  // Emit POLL_CYCLE summary
+  const sev = down > 0 ? "critical" : deg > 0 ? "warn" : "ok";
+  emitEvent("POLL_CYCLE", sev, null,
+    `Poll complete — ${up} UP / ${deg} DEGRADED / ${down} DOWN (${TARGETS.length} targets)`,
+    { up, degraded: deg, down, total: TARGETS.length });
 }
 
 // ── API ─────────────────────────────────────────────────────────────────────
@@ -521,67 +867,243 @@ app.get("/api/incidents", (_req, res) => {
   res.json({ incidents });
 });
 
+// ── API: SSE Real-time Event Stream ─────────────────────────────────────────
+app.get("/api/events/stream", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",     // nginx passthrough
+  });
+  // Send initial buffer as catch-up
+  for (const evt of eventBuffer.slice(-50)) {
+    res.write(`data: ${JSON.stringify(evt)}\n\n`);
+  }
+  sseClients.add(res);
+  log.info({ clients: sseClients.size }, "SSE client connected");
+
+  // Heartbeat every 15s to keep connection alive
+  const heartbeat = setInterval(() => {
+    try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); sseClients.delete(res); }
+  }, 15_000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+    log.info({ clients: sseClients.size }, "SSE client disconnected");
+  });
+});
+
+// ── API: Recent events (REST fallback) ──────────────────────────────────────
+app.get("/api/events/recent", (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 100, EVENT_BUFFER_SIZE);
+  const type = req.query.type || null;
+  let events = type
+    ? eventBuffer.filter((e) => e.type === type)
+    : [...eventBuffer];
+  res.json({ events: events.slice(-limit), total: eventBuffer.length, seq: eventSeq });
+});
+
+
+// ── API: Traffic Stats ──────────────────────────────────────────────────────
+app.get("/api/traffic/stats", (_req, res) => {
+  // Sort and cap top entries
+  const topN = (obj, n = 10) => Object.entries(obj)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([key, count]) => ({ key, count }));
+
+  res.json({
+    inbound: {
+      total: trafficStats.inbound.total,
+      topPaths: topN(trafficStats.inbound.perPath),
+      topIPs: topN(trafficStats.inbound.perIP),
+      topUAs: topN(trafficStats.inbound.perUA, 5),
+      history: trafficStats.inbound.history.slice(-15),
+    },
+    outbound: {
+      total: trafficStats.outbound.total,
+      perTarget: topN(trafficStats.outbound.perTarget),
+      history: trafficStats.outbound.history.slice(-15),
+    },
+    since: trafficStats.startedAt,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ── API: IP Intelligence (Honeypot) ─────────────────────────────────────────
+app.get("/api/traffic/intel", (_req, res) => {
+  // All tracked IPs, sorted by threat score desc, then hits desc
+  const allIPs = [...ipRegistry.values()]
+    .sort((a, b) => b.threatScore - a.threatScore || b.hits - a.hits);
+
+  // Country breakdown
+  const countries = Object.entries(countryStats)
+    .map(([code, data]) => ({
+      code, flag: data.flag, hits: data.hits,
+      uniqueIPs: data.ips.size, lastSeen: data.lastSeen,
+    }))
+    .sort((a, b) => b.hits - a.hits);
+
+  // Threats only (score >= 3)
+  const threats = allIPs.filter(r => r.threatScore >= 3);
+
+  // Summary
+  const summary = {
+    totalIPs: ipRegistry.size,
+    totalHits: allIPs.reduce((s, r) => s + r.hits, 0),
+    totalCountries: countries.length,
+    totalThreats: threats.length,
+    topCountry: countries[0] || null,
+    highestThreat: threats[0] || null,
+  };
+
+  // Return top 50 IPs (full records without rateHistory for bandwidth)
+  const topIPs = allIPs.slice(0, 50).map(r => {
+    const { rateHistory, ...rest } = r;
+    return { ...rest, rateBurst: r.rateBurst };
+  });
+
+  res.json({
+    summary,
+    ips: topIPs,
+    countries: countries.slice(0, 30),
+    threats: threats.slice(0, 20).map(r => {
+      const { rateHistory, ...rest } = r;
+      return rest;
+    }),
+    since: trafficStats.startedAt,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ── API: Infra Graph (Cytoscape.js) ───────────────────────────────────────
+// Real infrastructure topology with:
+//   - Virtual infra nodes (Traefik, Hetzner, K3s, Vercel, Firebase, Let's Encrypt)
+//   - Compound nodes (groups) for visual clustering
+//   - Auto-generated edges from real architecture knowledge
+//   - Live status + latency + cert info enrichment
 app.get("/api/infra-graph", (_req, res) => {
-  // 1. Nodes: map all targets as nodes
-  const nodes = TARGETS.map((t) => {
+  const now = new Date().toISOString();
+
+  // ── 1. Build enriched target nodes ──────────────────────────────────────
+  const targetNodes = TARGETS.map((t) => {
     const check = cache.get(t.id) || { status: "UNKNOWN", error: "PENDING_FIRST_CHECK" };
-    // Incidents for this node (last 3)
-    const nodeIncidents = incidents.filter(i => i.id === t.id).slice(0, 3);
+    const nodeIncidents = incidents.filter(i => i.id === t.id).slice(0, 5);
+    const ut = uptimeChecks.get(t.id);
+    const cert = certCache.get((() => { try { return new URL(t.url).hostname; } catch { return ""; } })());
+    const lh = latencyHistory.get(t.id) || [];
     return {
       data: {
         id: t.id,
-        label: t.name,
+        label: `${t.icon || ""} ${t.name}`,
         type: t.type || "service",
         status: check.status,
-        group: t.group || null,
-        diagnostic: check.error || check.diagnosis?.code || "OK",
+        parent: t.group, // compound node grouping
+        diagnostic: check.error || check.diagnosis?.message || null,
+        diagCode: check.diagnosis?.code || null,
+        failedAt: check.diagnosis?.failedAt || null,
         incidents: nodeIncidents,
         url: t.url,
+        httpCode: check.httpCode || null,
         latency: check.latency || null,
-        uptime: (uptimeChecks.get(t.id)?.up || 0) + "/" + (uptimeChecks.get(t.id)?.total || 0),
+        latencyHistory: lh,
+        latencyAvg: lh.length > 0 ? Math.round(lh.reduce((a, b) => a + b, 0) / lh.length) : null,
+        latencyP95: lh.length > 2 ? lh.slice().sort((a, b) => a - b)[Math.floor(lh.length * 0.95)] : null,
+        uptime: ut && ut.total > 0 ? ((ut.up / ut.total) * 100).toFixed(1) : null,
+        certDaysLeft: cert?.daysLeft || null,
+        certIssuer: cert?.issuer || null,
+        group: t.group,
+        icon: t.icon,
       }
     };
   });
 
-  // 2. Edges: simple heuristics (Traefik → services, Worker → containers, etc)
-  // For demo: statically define some edges (could be improved with config)
+  // ── 2. Virtual infrastructure nodes (not monitored, but real) ───────────
+  const infraNodes = [
+    { data: { id: "hetzner",       label: "☁️ Hetzner Cloud",     type: "cloud",    status: "INFRA", tier: "cloud" } },
+    { data: { id: "k3s-cluster",   label: "⎈ K3s Cluster",       type: "k8s",      status: "INFRA", tier: "platform" } },
+    { data: { id: "traefik",       label: "🔀 Traefik Ingress",   type: "ingress",  status: "INFRA", tier: "platform" } },
+    { data: { id: "letsencrypt",   label: "🔒 Let's Encrypt",     type: "ca",       status: "INFRA", tier: "external" } },
+    { data: { id: "vercel",        label: "▲ Vercel",             type: "cloud",    status: "INFRA", tier: "external" } },
+    { data: { id: "firebase",      label: "🔥 Firebase / GCP",    type: "cloud",    status: "INFRA", tier: "external" } },
+    { data: { id: "discord",       label: "💬 Discord Webhooks",  type: "external", status: "INFRA", tier: "external" } },
+    { data: { id: "prometheus",    label: "📊 Prometheus",        type: "monitoring", status: "INFRA", parent: "INFRA", tier: "platform" } },
+    { data: { id: "loki",          label: "📜 Loki",              type: "monitoring", status: "INFRA", parent: "INFRA", tier: "platform" } },
+  ];
+
+  // ── 3. Group (compound) nodes ───────────────────────────────────────────
+  const groups = [...new Set(TARGETS.map(t => t.group))];
+  const groupColors = {
+    "ALERT-IMMO": "#00ff41", "EXAM-DRILL": "#00aaff", "CAPIPILOT": "#ff9ff3",
+    "IMPACTDROIT": "#feca57", "RENT-APPLY": "#0abde3", "INFRA": "#636e72",
+  };
+  const groupNodes = groups.map(g => ({
+    data: {
+      id: g,
+      label: g,
+      type: "group",
+      status: "GROUP",
+      color: groupColors[g] || "#555",
+    }
+  }));
+
+  // ── 4. Edges — real architecture topology ───────────────────────────────
   const edges = [];
-  // Example: Traefik routes
-  const traefik = TARGETS.find(t => t.id === "traefik");
-  if (traefik) {
-    for (const t of TARGETS) {
-      if (t.id !== "traefik" && t.group && ["k8s", "docker"].includes(t.type)) {
-        edges.push({ data: { source: "traefik", target: t.id, type: "network", critical: true } });
-      }
+  const edge = (src, tgt, type, critical = false, label = "") =>
+    edges.push({ data: { source: src, target: tgt, type, critical, label } });
+
+  // Cloud → Platform
+  edge("hetzner", "k3s-cluster", "hosts", true);
+  edge("k3s-cluster", "traefik", "runs", true);
+
+  // Traefik routes → all apps on K3s (*.delpech.dev + custom domains)
+  const k3sApps = [
+    "alert-immo-gateway", "alert-immo-system", "alert-immo-frontend",
+    "exam-drill-api", "impactdroit-api", "impactdroit-analyzer", "impactdroit-frontend",
+    "grafana", "sitrep",
+  ];
+  for (const appId of k3sApps) {
+    if (TARGETS.find(t => t.id === appId)) {
+      edge("traefik", appId, "routes", true);
     }
   }
-  // Example: Worker-1 → containers
-  const worker = TARGETS.find(t => t.id === "worker1");
-  if (worker) {
-    for (const t of TARGETS) {
-      if (t.id !== "worker1" && t.group && t.group === worker.group && t.type !== "server") {
-        edges.push({ data: { source: "worker1", target: t.id, type: "hosted-on" } });
-      }
+
+  // Alert-Immo internal: frontend → gateway → backends
+  edge("alert-immo-frontend", "alert-immo-gateway", "api-call", true);
+  edge("alert-immo-gateway", "alert-immo-system", "health-agg", false);
+
+  // ImpactDroit: frontend → api, api → analyzer
+  edge("impactdroit-frontend", "impactdroit-api", "api-call", true);
+  edge("impactdroit-api", "impactdroit-analyzer", "analysis", true);
+
+  // Capipilot: hosted on Firebase/GCP (not K3s)
+  edge("firebase", "capipilot-api", "hosts", true);
+
+  // Rent-Apply: hosted on Vercel
+  edge("vercel", "rent-apply", "hosts", true);
+
+  // TLS: Let's Encrypt → Traefik (cert-manager)
+  edge("letsencrypt", "traefik", "issues-certs", false, "cert-manager");
+
+  // Monitoring: Grafana ← Prometheus, Grafana ← Loki
+  edge("prometheus", "grafana", "data-source", false);
+  edge("loki", "grafana", "data-source", false);
+
+  // SITREP → Discord alerts
+  edge("sitrep", "discord", "alerts", false);
+
+  // SITREP monitors everything (dotted, non-critical)
+  for (const t of TARGETS) {
+    if (t.id !== "sitrep") {
+      edge("sitrep", t.id, "monitors", false);
     }
   }
-  // Example: Gitea → PostgreSQL
-  if (TARGETS.find(t => t.id === "gitea") && TARGETS.find(t => t.id === "pg-gitea")) {
-    edges.push({ data: { source: "gitea", target: "pg-gitea", type: "db", critical: true } });
-  }
-  // Example: Next.js → Spring Boot
-  if (TARGETS.find(t => t.id === "nextjs") && TARGETS.find(t => t.id === "spring")) {
-    edges.push({ data: { source: "nextjs", target: "spring", type: "api" } });
-  }
 
-  // TODO: enrich with more edges as needed
+  // ── 5. Assemble ─────────────────────────────────────────────────────────
+  const allNodes = [...groupNodes, ...infraNodes, ...targetNodes];
 
-  res.json({
-    timestamp: new Date().toISOString(),
-    nodes,
-    edges
-  });
+  res.json({ timestamp: now, nodes: allNodes, edges });
 });
 
 // ── API: Multi-App Registry ─────────────────────────────────────────────────
@@ -821,6 +1343,10 @@ const server = app.listen(PORT, () => {
     dev: IS_DEV,
     discord: !!DISCORD_WEBHOOK,
   }, `SITREP v2.1 online — http://localhost:${PORT}`);
+
+  emitEvent("STARTUP", "info", null,
+    `SITREP v2.1 online — ${TARGETS.length} targets, poll every ${POLL_INTERVAL / 1000}s`,
+    { port: PORT, targets: TARGETS.length, pollInterval: POLL_INTERVAL, mockMode: MOCK_MODE });
 
   pollAll();
   setInterval(pollAll, POLL_INTERVAL);

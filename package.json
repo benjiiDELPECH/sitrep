@@ -1,6 +1,6 @@
 {
   "name": "sitrep",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "SITREP — Tactical Ops Dashboard. Real-time health monitoring for all production assets.",
   "main": "server.js",
   "scripts": {

@@ -86,6 +86,15 @@ if (externalAppsPath && fs.existsSync(externalAppsPath)) {
       backendUrl: process.env.CAPIPILOT_BACKEND_URL || "https://api.capilot.app",
       dashboard: null,
     },
+    {
+      id: "rent-apply",
+      name: "RentApply",
+      icon: "🏢",
+      group: "RENT-APPLY",
+      description: "Dossier de candidature locative — Genève",
+      backendUrl: process.env.RENTAPPLY_BACKEND_URL || "https://rent-apply.delpech.dev",
+      dashboard: null,
+    },
   ];
 }
 
@@ -194,12 +203,21 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
 
   // ── FRONTENDS ───────────────────────────────────────────────────────────
   {
-    id: "rent-apply",
-    name: "Rent Apply",
+    id: "rent-apply-web",
+    name: "Rent Apply Web",
     group: "RENT-APPLY",
     type: "web",
     icon: "🏢",
     url: "https://rent-apply.delpech.dev",
+    timeout: 10000,
+  },
+  {
+    id: "rent-apply-health",
+    name: "Rent Apply API",
+    group: "RENT-APPLY",
+    type: "composite",
+    icon: "🏠",
+    url: "https://rent-apply.delpech.dev/api/health",
     timeout: 10000,
   },
   // benjamindelpech.dev — DNS not configured yet

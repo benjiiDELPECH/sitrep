@@ -1,5 +1,5 @@
 // ============================================================================
-// SITREP — Tactical Ops Dashboard v2.0
+// SITREP — Tactical Ops Dashboard v2.2
 // ============================================================================
 // Real-time health monitoring for all production assets.
 // Features: health polling, uptime tracking, latency history, SSL cert expiry,
@@ -1062,6 +1062,7 @@ app.get("/api/infra-graph", (_req, res) => {
   const k3sApps = [
     "alert-immo-gateway", "alert-immo-system", "alert-immo-frontend",
     "exam-drill-api", "impactdroit-api", "impactdroit-analyzer", "impactdroit-frontend",
+    "rent-apply-web",
     "grafana", "sitrep",
   ];
   for (const appId of k3sApps) {
@@ -1081,8 +1082,8 @@ app.get("/api/infra-graph", (_req, res) => {
   // Capipilot: hosted on Firebase/GCP (not K3s)
   edge("firebase", "capipilot-api", "hosts", true);
 
-  // Rent-Apply: hosted on Vercel
-  edge("vercel", "rent-apply", "hosts", true);
+  // Rent-Apply: self-hosted on K3s (rent-apply.delpech.dev)
+  edge("rent-apply-web", "rent-apply-health", "health-agg", false);
 
   // TLS: Let's Encrypt → Traefik (cert-manager)
   edge("letsencrypt", "traefik", "issues-certs", false, "cert-manager");
@@ -1446,10 +1447,10 @@ const server = app.listen(PORT, () => {
     mockMode: MOCK_MODE,
     dev: IS_DEV,
     discord: !!DISCORD_WEBHOOK,
-  }, `SITREP v2.1 online — http://localhost:${PORT}`);
+  }, `SITREP v2.2 online — http://localhost:${PORT}`);
 
   emitEvent("STARTUP", "info", null,
-    `SITREP v2.1 online — ${TARGETS.length} targets, poll every ${POLL_INTERVAL / 1000}s`,
+    `SITREP v2.2 online — ${TARGETS.length} targets, poll every ${POLL_INTERVAL / 1000}s`,
     { port: PORT, targets: TARGETS.length, pollInterval: POLL_INTERVAL, mockMode: MOCK_MODE });
 
   pollAll();

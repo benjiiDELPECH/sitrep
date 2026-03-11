@@ -1,5 +1,5 @@
 // ============================================================================
-// SITREP — Frontend Logic v2.0
+// SITREP — Frontend Logic v2.2
 // ============================================================================
 // Features: dynamic favicon, push notifications, alert sounds, sparklines,
 //           uptime %, countdown bar, cert expiry, persistent incident log

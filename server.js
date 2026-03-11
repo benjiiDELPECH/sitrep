@@ -339,12 +339,12 @@ function scoreThreat(record, req) {
   record.rateHistory.push(now);
   record.rateHistory = record.rateHistory.filter(t => now - t < 60000);
   record.rateBurst = record.rateHistory.length;
-  if (record.rateBurst > 30) {
-    score += 2;
-    reasons.push('RATE_BURST');
-  } else if (record.rateBurst > 60) {
+  if (record.rateBurst > 60) {
     score += 4;
     reasons.push('RATE_FLOOD');
+  } else if (record.rateBurst > 30) {
+    score += 2;
+    reasons.push('RATE_BURST');
   }
 
   // 4. 4xx accumulation (probing)

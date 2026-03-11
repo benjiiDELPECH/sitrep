@@ -18,6 +18,7 @@ const { promisify } = require("util");
 const { TARGETS, APPS } = require("./config");
 const log = require("./lib/logger");
 const { loadIncidents, saveIncidents } = require("./lib/persistence");
+const monitoringHub = require("./lib/monitoring-hub");
 const geoip = require("geoip-lite");
 
 const dnsResolve4 = promisify(dns.resolve4);
@@ -1260,6 +1261,109 @@ app.get("/api/database-metrics", (_req, res) => {
   res.json({ metrics, timestamp: new Date().toISOString() });
 });
 
+// ============================================================================
+// MONITORING HUB — Multi-Source Infrastructure Intelligence
+// ============================================================================
+// Aggregates: GitHub (PRs, CI, commits), Code Intelligence (Neo4j),
+//             Finance/Budget, Notion (roadmap, planning), Infra Health
+// ============================================================================
+
+// ── API: Monitoring Dashboard (all modules) ─────────────────────────────────
+app.get("/api/monitoring/dashboard", (_req, res) => {
+  try {
+    const dashboard = monitoringHub.getDashboard();
+    res.json(dashboard);
+  } catch (err) {
+    log.error({ err: err.message }, "Monitoring dashboard failed");
+    res.status(500).json({ error: "Monitoring dashboard unavailable" });
+  }
+});
+
+// ── API: Per-Project Unified View ───────────────────────────────────────────
+app.get("/api/monitoring/project/:projectName", (req, res) => {
+  const { projectName } = req.params;
+  try {
+    const view = monitoringHub.getProjectView(projectName);
+    res.json(view);
+  } catch (err) {
+    log.error({ err: err.message, project: projectName }, "Project view failed");
+    res.status(500).json({ error: `Project view unavailable: ${projectName}` });
+  }
+});
+
+// ── API: GitHub Module ──────────────────────────────────────────────────────
+app.get("/api/monitoring/github", (_req, res) => {
+  try {
+    const github = require("./lib/collectors/github");
+    res.json(github.getSummary());
+  } catch (err) {
+    res.status(503).json({ error: "GitHub collector not available", message: err.message });
+  }
+});
+
+app.get("/api/monitoring/github/:repo", (req, res) => {
+  try {
+    const github = require("./lib/collectors/github");
+    const detail = github.getRepoDetail(req.params.repo);
+    if (!detail?.stats) return res.status(404).json({ error: `Repo not found: ${req.params.repo}` });
+    res.json(detail);
+  } catch (err) {
+    res.status(503).json({ error: "GitHub collector not available" });
+  }
+});
+
+// ── API: Code Intelligence Module ───────────────────────────────────────────
+app.get("/api/monitoring/code", (_req, res) => {
+  try {
+    const codeIntel = require("./lib/collectors/code-intelligence");
+    res.json(codeIntel.getSummary());
+  } catch (err) {
+    res.status(503).json({ error: "Code Intelligence not available", message: err.message });
+  }
+});
+
+app.get("/api/monitoring/code/:project", (req, res) => {
+  try {
+    const codeIntel = require("./lib/collectors/code-intelligence");
+    const detail = codeIntel.getProjectDetail(req.params.project);
+    if (!detail) return res.status(404).json({ error: `Project not found: ${req.params.project}` });
+    res.json(detail);
+  } catch (err) {
+    res.status(503).json({ error: "Code Intelligence not available" });
+  }
+});
+
+// ── API: Finance / Budget Module ────────────────────────────────────────────
+app.get("/api/monitoring/finance", (_req, res) => {
+  try {
+    const finance = require("./lib/collectors/finance");
+    res.json(finance.getSummary());
+  } catch (err) {
+    res.status(503).json({ error: "Finance collector not available", message: err.message });
+  }
+});
+
+// ── API: Notion / Roadmap Module ────────────────────────────────────────────
+app.get("/api/monitoring/roadmap", (_req, res) => {
+  try {
+    const notionSync = require("./lib/collectors/notion-sync");
+    res.json(notionSync.getSummary());
+  } catch (err) {
+    res.status(503).json({ error: "Notion sync not available", message: err.message });
+  }
+});
+
+// ── API: Monitoring Hub Refresh ─────────────────────────────────────────────
+app.post("/api/monitoring/refresh", async (_req, res) => {
+  try {
+    await monitoringHub.stop();
+    await monitoringHub.start();
+    res.json({ ok: true, timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: "Refresh failed", message: err.message });
+  }
+});
+
 // ── Database Metrics Polling (Prometheus) ───────────────────────────────────
 async function pollDatabaseMetrics() {
   const prometheusUrl = process.env.PROMETHEUS_URL;
@@ -1354,6 +1458,11 @@ const server = app.listen(PORT, () => {
   // SSL cert check on startup + every 6h
   pollCerts();
   setInterval(pollCerts, CERT_CHECK_INTERVAL);
+
+  // Start Monitoring Hub (GitHub, Code Intelligence, Finance, Notion)
+  monitoringHub.start().catch((err) => {
+    log.error({ err: err.message }, "Monitoring Hub failed to start — continuing without collectors");
+  });
 });
 
 // ── Graceful shutdown (K8s SIGTERM) ─────────────────────────────────────────
@@ -1361,6 +1470,8 @@ function gracefulShutdown(signal) {
   log.info({ signal }, "Shutting down gracefully...");
   // Persist incidents before exit
   saveIncidents(incidents);
+  // Stop monitoring hub collectors
+  monitoringHub.stop().catch(() => {});
   server.close(() => {
     log.info("HTTP server closed. Goodbye.");
     process.exit(0);

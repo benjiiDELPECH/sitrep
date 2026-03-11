@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SITREP — Monitoring Hub</title>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #12121a;
+      --surface2: #1a1a28;
+      --border: #2a2a3a;
+      --text: #e0e0e0;
+      --text-muted: #888;
+      --accent: #00ff41;
+      --accent2: #00aaff;
+      --warn: #ffaa00;
+      --danger: #ff3333;
+      --success: #00ff41;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 18px; color: var(--accent); }
+    .header .nav { display: flex; gap: 12px; }
+    .header .nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+    .header .nav a:hover, .header .nav a.active {
+      background: var(--surface2);
+      color: var(--accent);
+    }
+
+    .health-banner {
+      padding: 16px 24px;
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .health-score {
+      width: 80px; height: 80px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 28px; font-weight: bold;
+      border: 3px solid;
+    }
+    .health-score.good { border-color: var(--success); color: var(--success); }
+    .health-score.warn { border-color: var(--warn); color: var(--warn); }
+    .health-score.bad { border-color: var(--danger); color: var(--danger); }
+    .health-factors { flex: 1; display: flex; gap: 12px; flex-wrap: wrap; }
+    .health-factor {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+    .health-factor .label { color: var(--text-muted); margin-bottom: 2px; }
+    .health-factor .value { font-size: 16px; font-weight: bold; }
+
+    .modules-status {
+      padding: 8px 24px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      display: flex; gap: 16px;
+    }
+    .module-badge {
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 10px;
+    }
+    .module-badge.on { background: #00ff4122; color: var(--success); border: 1px solid var(--success); }
+    .module-badge.off { background: #ff333322; color: var(--danger); border: 1px solid #ff333344; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 16px;
+      padding: 20px 24px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      font-weight: bold;
+    }
+    .card-header .badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--surface2);
+    }
+    .card-body { padding: 16px; }
+    .card-body.compact { padding: 12px 16px; }
+
+    /* KPI Row */
+    .kpi-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .kpi {
+      flex: 1;
+      min-width: 100px;
+      background: var(--surface2);
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .kpi .value { font-size: 24px; font-weight: bold; color: var(--accent); }
+    .kpi .label { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+    .kpi.warn .value { color: var(--warn); }
+    .kpi.danger .value { color: var(--danger); }
+
+    /* Tables */
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; color: var(--text-muted); padding: 6px 8px; font-weight: 500; }
+    td { padding: 6px 8px; border-top: 1px solid var(--border); }
+    tr:hover { background: var(--surface2); }
+
+    /* Status badges */
+    .status { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: bold; }
+    .status.success { background: #00ff4122; color: var(--success); }
+    .status.failure { background: #ff333322; color: var(--danger); }
+    .status.pending { background: #ffaa0022; color: var(--warn); }
+    .status.neutral { background: var(--surface2); color: var(--text-muted); }
+
+    /* Progress bar */
+    .progress-bar {
+      height: 6px;
+      background: var(--surface2);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 4px 0;
+    }
+    .progress-bar .fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.5s;
+    }
+
+    /* Provider costs */
+    .provider-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .provider-row:last-child { border-bottom: none; }
+    .provider-row .icon { font-size: 18px; width: 28px; text-align: center; }
+    .provider-row .name { flex: 1; font-size: 13px; }
+    .provider-row .cost { font-weight: bold; font-size: 14px; }
+
+    /* Roadmap items */
+    .roadmap-item {
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .roadmap-item:last-child { border-bottom: none; }
+    .roadmap-item .title { font-weight: 500; margin-bottom: 3px; }
+    .roadmap-item .meta { color: var(--text-muted); font-size: 11px; display: flex; gap: 8px; }
+
+    /* Repo cards */
+    .repo-mini {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .repo-mini:last-child { border-bottom: none; }
+    .repo-mini .repo-name { flex: 1; font-weight: 500; }
+    .repo-mini .commits { color: var(--accent2); }
+    .repo-mini .prs { color: var(--warn); }
+
+    .refresh-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    .refresh-btn:hover { background: var(--accent); color: var(--bg); }
+
+    .timestamp { font-size: 10px; color: var(--text-muted); }
+    .empty { color: var(--text-muted); font-style: italic; padding: 20px; text-align: center; }
+
+    @media (max-width: 768px) {
+      .grid { grid-template-columns: 1fr; }
+      .health-banner { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📡 SITREP — Monitoring Hub</h1>
+    <div class="nav">
+      <a href="/">🎯 Status</a>
+      <a href="/infra.html">🗺️ Infra Map</a>
+      <a href="/admin.html">⚙️ Admin</a>
+      <a href="/monitoring.html" class="active">📡 Monitoring</a>
+    </div>
+  </div>
+
+  <div class="health-banner" id="healthBanner">
+    <div class="health-score good" id="overallScore">—</div>
+    <div class="health-factors" id="healthFactors">
+      <div class="health-factor"><div class="label">Loading...</div></div>
+    </div>
+    <button class="refresh-btn" onclick="refresh()">🔄 Refresh</button>
+  </div>
+
+  <div class="modules-status" id="modulesStatus"></div>
+
+  <div class="grid">
+    <!-- GitHub / CI Card -->
+    <div class="card">
+      <div class="card-header">
+        🐙 GitHub & CI/CD
+        <span class="badge" id="githubBadge">—</span>
+      </div>
+      <div class="card-body">
+        <div class="kpi-row" id="githubKPIs"></div>
+        <div style="margin-top: 12px;" id="repoList"></div>
+      </div>
+    </div>
+
+    <!-- Code Intelligence Card -->
+    <div class="card">
+      <div class="card-header">
+        🧠 Code Intelligence
+        <span class="badge" id="codeBadge">Neo4j</span>
+      </div>
+      <div class="card-body">
+        <div class="kpi-row" id="codeKPIs"></div>
+        <table style="margin-top: 12px;" id="codeTable">
+          <thead><tr><th>Project</th><th>Files</th><th>LOC</th><th>Health</th></tr></thead>
+          <tbody id="codeTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Finance / Budget Card -->
+    <div class="card">
+      <div class="card-header">
+        💰 Finance & Budget
+        <span class="badge" id="financeBadge">—</span>
+      </div>
+      <div class="card-body">
+        <div class="kpi-row" id="financeKPIs"></div>
+        <div style="margin-top: 12px;" id="providerList"></div>
+      </div>
+    </div>
+
+    <!-- Roadmap / Notion Card -->
+    <div class="card">
+      <div class="card-header">
+        🗺️ Roadmap & Planning
+        <span class="badge" id="roadmapBadge">Notion</span>
+      </div>
+      <div class="card-body">
+        <div class="kpi-row" id="roadmapKPIs"></div>
+        <div style="margin-top: 12px;" id="roadmapList"></div>
+      </div>
+    </div>
+
+    <!-- Test Coverage Card -->
+    <div class="card">
+      <div class="card-header">
+        🧪 Test Coverage
+        <span class="badge" id="testBadge">—</span>
+      </div>
+      <div class="card-body" id="testCoverage">
+        <div class="empty">Coverage data collected from CI artifacts</div>
+      </div>
+    </div>
+
+    <!-- Incidents / Alerts Card -->
+    <div class="card">
+      <div class="card-header">
+        🚨 Incidents & Alerts
+        <span class="badge" id="incidentBadge">—</span>
+      </div>
+      <div class="card-body compact" id="incidentList">
+        <div class="empty">Loading incidents...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let data = null;
+
+    async function loadDashboard() {
+      try {
+        const res = await fetch('/api/monitoring/dashboard');
+        data = await res.json();
+        render(data);
+      } catch (err) {
+        console.error('Dashboard load failed:', err);
+      }
+
+      // Also load incidents
+      try {
+        const res = await fetch('/api/incidents');
+        const { incidents } = await res.json();
+        renderIncidents(incidents);
+      } catch (err) {
+        console.error('Incidents load failed:', err);
+      }
+    }
+
+    async function refresh() {
+      try {
+        await fetch('/api/monitoring/refresh', { method: 'POST' });
+        await loadDashboard();
+      } catch (err) {
+        console.error('Refresh failed:', err);
+      }
+    }
+
+    function render(data) {
+      // Health Score
+      const score = data.overallHealth;
+      const scoreEl = document.getElementById('overallScore');
+      scoreEl.textContent = score != null ? score : '—';
+      scoreEl.className = 'health-score ' + (score >= 70 ? 'good' : score >= 40 ? 'warn' : 'bad');
+
+      // Health Factors
+      const factorsEl = document.getElementById('healthFactors');
+      factorsEl.innerHTML = (data.healthFactors || []).map(f => `
+        <div class="health-factor">
+          <div class="label">${f.name}</div>
+          <div class="value" style="color: ${f.score >= 70 ? 'var(--success)' : f.score >= 40 ? 'var(--warn)' : 'var(--danger)'}">
+            ${f.score}%
+          </div>
+        </div>
+      `).join('');
+
+      // Modules Status
+      const modulesEl = document.getElementById('modulesStatus');
+      const all = [...(data.enabledModules || []).map(m => ({ m, on: true })),
+                   ...(data.disabledModules || []).map(m => ({ m, on: false }))];
+      modulesEl.innerHTML = 'Modules: ' + all.map(({ m, on }) =>
+        `<span class="module-badge ${on ? 'on' : 'off'}">${on ? '✓' : '✗'} ${m}</span>`
+      ).join('');
+
+      // GitHub
+      renderGitHub(data.modules?.github);
+
+      // Code Intelligence
+      renderCode(data.modules?.codeIntelligence);
+
+      // Finance
+      renderFinance(data.modules?.finance);
+
+      // Roadmap
+      renderRoadmap(data.modules?.notion);
+    }
+
+    function renderGitHub(gh) {
+      const kpis = document.getElementById('githubKPIs');
+      const list = document.getElementById('repoList');
+
+      if (!gh) {
+        kpis.innerHTML = '<div class="empty">GitHub collector not enabled (set GITHUB_TOKEN)</div>';
+        list.innerHTML = '';
+        return;
+      }
+
+      const s = gh.summary;
+      kpis.innerHTML = `
+        <div class="kpi"><div class="value">${s.totalCommits7d}</div><div class="label">Commits (7d)</div></div>
+        <div class="kpi"><div class="value">${s.totalCommits30d}</div><div class="label">Commits (30d)</div></div>
+        <div class="kpi ${s.totalOpenPRs > 5 ? 'warn' : ''}"><div class="value">${s.totalOpenPRs}</div><div class="label">Open PRs</div></div>
+        <div class="kpi"><div class="value">${s.ciHealthPct != null ? s.ciHealthPct + '%' : '—'}</div><div class="label">CI Health</div></div>
+      `;
+
+      document.getElementById('githubBadge').textContent = `${s.totalRepos} repos`;
+
+      list.innerHTML = (gh.repos || []).map(r => `
+        <div class="repo-mini">
+          <span class="repo-name">${r.repo}</span>
+          <span class="commits">📊 ${r.commits?.total7d || 0}</span>
+          <span class="prs">🔀 ${r.prs?.open || 0}</span>
+          <span class="status ${r.ci?.lastStatus === 'success' ? 'success' : r.ci?.lastStatus === 'failure' ? 'failure' : 'neutral'}">
+            ${r.ci?.lastStatus || '—'}
+          </span>
+        </div>
+      `).join('');
+    }
+
+    function renderCode(code) {
+      const kpis = document.getElementById('codeKPIs');
+      const tbody = document.getElementById('codeTableBody');
+
+      if (!code?.aggregate) {
+        kpis.innerHTML = '<div class="empty">Code Intelligence not enabled (set NEO4J_PASSWORD)</div>';
+        tbody.innerHTML = '';
+        return;
+      }
+
+      const a = code.aggregate;
+      kpis.innerHTML = `
+        <div class="kpi"><div class="value">${(a.totalLOC / 1000).toFixed(1)}k</div><div class="label">Total LOC</div></div>
+        <div class="kpi"><div class="value">${a.totalFiles}</div><div class="label">Files</div></div>
+        <div class="kpi"><div class="value">${a.totalClasses + a.totalFunctions}</div><div class="label">Classes+Fn</div></div>
+        <div class="kpi"><div class="value">${a.avgHealthScore}</div><div class="label">Avg Health</div></div>
+      `;
+
+      tbody.innerHTML = Object.entries(code.projects || {}).map(([name, p]) => `
+        <tr>
+          <td>${name}</td>
+          <td>${p.totalFiles}</td>
+          <td>${(p.totalLOC / 1000).toFixed(1)}k</td>
+          <td>
+            <div class="progress-bar" style="width: 60px; display: inline-block; vertical-align: middle;">
+              <div class="fill" style="width: ${p.healthScore}%; background: ${p.healthScore >= 70 ? 'var(--success)' : p.healthScore >= 40 ? 'var(--warn)' : 'var(--danger)'}"></div>
+            </div>
+            <span style="font-size: 11px; margin-left: 4px;">${p.healthScore}</span>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function renderFinance(fin) {
+      const kpis = document.getElementById('financeKPIs');
+      const list = document.getElementById('providerList');
+
+      if (!fin) {
+        kpis.innerHTML = '<div class="empty">Finance collector initializing...</div>';
+        list.innerHTML = '';
+        return;
+      }
+
+      const budgetClass = fin.budgetUsagePct > 100 ? 'danger' : fin.budgetUsagePct > 80 ? 'warn' : '';
+      kpis.innerHTML = `
+        <div class="kpi"><div class="value">${fin.totalMonthly?.toFixed(2)}€</div><div class="label">Monthly</div></div>
+        <div class="kpi"><div class="value">${fin.totalAnnual?.toFixed(0)}€</div><div class="label">Annual</div></div>
+        <div class="kpi ${budgetClass}"><div class="value">${fin.budgetUsagePct}%</div><div class="label">Budget Used</div></div>
+        <div class="kpi"><div class="value">${fin.monthlyBudget}€</div><div class="label">Budget Cap</div></div>
+      `;
+
+      document.getElementById('financeBadge').textContent = fin.budgetStatus || '—';
+
+      list.innerHTML = (fin.providers || []).map(p => `
+        <div class="provider-row">
+          <span class="icon">${p.icon}</span>
+          <span class="name">${p.name} <span style="color: var(--text-muted); font-size: 10px;">${p.type}</span></span>
+          <span class="cost" style="color: ${p.monthlyCost > 0 ? 'var(--warn)' : 'var(--success)'}">
+            ${p.monthlyCost > 0 ? p.monthlyCost.toFixed(2) + '€' : 'FREE'}
+          </span>
+        </div>
+      `).join('');
+    }
+
+    function renderRoadmap(notion) {
+      const kpis = document.getElementById('roadmapKPIs');
+      const list = document.getElementById('roadmapList');
+
+      if (!notion?.roadmap) {
+        kpis.innerHTML = '<div class="empty">Notion sync not enabled (set NOTION_API_TOKEN)</div>';
+        list.innerHTML = '';
+        return;
+      }
+
+      const a = notion.roadmap.analytics;
+      kpis.innerHTML = `
+        <div class="kpi"><div class="value">${a.total}</div><div class="label">Total Items</div></div>
+        <div class="kpi"><div class="value">${a.velocity7d}</div><div class="label">Done (7d)</div></div>
+        <div class="kpi ${a.overdue > 0 ? 'danger' : ''}"><div class="value">${a.overdue}</div><div class="label">Overdue</div></div>
+        <div class="kpi"><div class="value">${a.recentlyUpdated}</div><div class="label">Updated (7d)</div></div>
+      `;
+
+      list.innerHTML = (notion.roadmap.items || []).slice(0, 8).map(item => `
+        <div class="roadmap-item">
+          <div class="title">${item.title}</div>
+          <div class="meta">
+            ${item.status ? `<span class="status ${item.status.toLowerCase().includes('done') ? 'success' : item.status.toLowerCase().includes('progress') ? 'pending' : 'neutral'}">${item.status}</span>` : ''}
+            ${item.project ? `<span>📁 ${item.project}</span>` : ''}
+            ${item.priority ? `<span>⚡ ${item.priority}</span>` : ''}
+            ${item.dueDate ? `<span>📅 ${item.dueDate}</span>` : ''}
+          </div>
+        </div>
+      `).join('') || '<div class="empty">No roadmap items found</div>';
+    }
+
+    function renderIncidents(incidents) {
+      const el = document.getElementById('incidentList');
+      const badge = document.getElementById('incidentBadge');
+
+      if (!incidents?.length) {
+        el.innerHTML = '<div class="empty">No incidents recorded</div>';
+        badge.textContent = '0';
+        return;
+      }
+
+      // Count recent (24h)
+      const now = Date.now();
+      const recent = incidents.filter(i => now - new Date(i.at).getTime() < 86400000);
+      badge.textContent = `${recent.length} (24h)`;
+
+      el.innerHTML = incidents.slice(0, 15).map(i => {
+        const ago = timeAgo(i.at);
+        const isDown = i.to === 'DOWN';
+        const isDegraded = i.to === 'DEGRADED';
+        return `
+          <div style="display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 11px;">
+            <span>${i.icon || '●'}</span>
+            <span style="flex: 1;">${i.name}</span>
+            <span class="status ${isDown ? 'failure' : isDegraded ? 'pending' : 'success'}">${i.from} → ${i.to}</span>
+            <span class="timestamp">${ago}</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function timeAgo(iso) {
+      const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+      if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+      return `${Math.floor(s / 86400)}d ago`;
+    }
+
+    // Initial load
+    loadDashboard();
+    // Auto-refresh every 60s
+    setInterval(loadDashboard, 60000);
+  </script>
+</body>
+</html>

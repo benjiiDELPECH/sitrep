@@ -13,6 +13,7 @@ flowchart TB
         UI["index.html\nDashboard principal"]
         ADMIN["admin.html\nDashboard business"]
         INFRA["infra.html\nGraphe d'infra"]
+        MONITOR["monitoring.html\nMonitoring Hub"]
     end
 
     subgraph SERVER["⚙️ server.js — Express"]
@@ -62,7 +63,7 @@ flowchart TB
         ED["📝 Exam-Drill\nSpring Boot API"]
         CP["✈️ Capipilot\nSpring Boot API"]
         ID["⚖️ ImpactDroit\nAPI + Analyzer + Frontend"]
-        RA["🏢 Rent-Apply\nFrontend Vercel"]
+        RA["🏢 Rent-Apply\nWeb + API K3s"]
         INF["📈 Grafana + SITREP"]
     end
 
@@ -91,7 +92,7 @@ flowchart TB
     classDef target fill:#0d1117,stroke:#ff6b6b,color:#e0e0e0
     classDef alert fill:#1a1a2e,stroke:#ff9ff3,color:#e0e0e0
 
-    class UI,ADMIN,INFRA client
+    class UI,ADMIN,INFRA,MONITOR client
     class HELMET,RATE,PINO,POLL,CHECK,DIAG,MOCK,CERTPOLL,CERTCHECK server
     class STATUS,INCIDENTS,APPS_EP,PROXY,HEALTH,IGRAPH,DBMET server
     class HEALTHZ,READYZ,METRICS server
@@ -106,23 +107,30 @@ flowchart TB
 
 ```
 sitrep/
-├── server.js              ← Serveur Express principal (850 lignes)
+├── server.js              ← Serveur Express principal (~1490 lignes)
 ├── config.js              ← Registre des cibles et apps (231 lignes)
 ├── lib/
 │   ├── logger.js          ← Logger structuré Pino
 │   ├── mock.js            ← Faux health checks pour dev local
-│   └── persistence.js     ← Sauvegarde incidents sur disque
+│   ├── persistence.js     ← Sauvegarde incidents sur disque
+│   ├── monitoring-hub.js  ← Orchestrateur des 4 collectors
+│   └── collectors/
+│       ├── github.js      ← GitHub REST API (repos, PRs, CI)
+│       ├── code-intelligence.js ← Neo4j Code Graph
+│       ├── finance.js     ← Budget tracking + Hetzner API
+│       └── notion-sync.js ← Notion roadmap sync
 ├── public/
 │   ├── index.html         ← Dashboard principal
 │   ├── admin.html         ← Dashboard business multi-app
 │   ├── infra.html         ← Graphe d'infrastructure (Cytoscape.js)
+│   ├── monitoring.html    ← Monitoring Hub (GitHub, Code, Finance, Roadmap)
 │   ├── app.js             ← JS frontend dashboard
 │   ├── admin-app.js       ← JS frontend admin
 │   └── style.css          ← Styles communs
 ├── docker-compose.dev.yml ← Stack dev locale one-click
 ├── Dockerfile             ← Image prod (Node 20 Alpine)
 ├── .env.example           ← Variables d'environnement documentées
-└── package.json           ← v2.1.0
+└── package.json           ← v2.2.0
 ```
 
 ---
@@ -276,7 +284,8 @@ flowchart LR
     end
 
     subgraph RENTAPPLY["🏢 RENT-APPLY"]
-        RA1["Rent Apply\nweb"]
+        RA1["Rent Apply Web\nweb"]
+        RA2["Rent Apply API\ncomposite"]
     end
 
     subgraph INFRAGRP["📈 INFRA"]
@@ -291,7 +300,7 @@ flowchart LR
 
     class AI1,ED1,CP1,ID1,ID2 spring
     class AI3,ID3,RA1,INF2 web
-    class AI2 composite
+    class AI2,RA2 composite
     class INF1 grafana
 ```
 
@@ -517,4 +526,4 @@ Dans `config.js` (section APPS) :
 
 ---
 
-*SITREP v2.1.0 — dernière mise à jour : mars 2026*
+*SITREP v2.2.0 — dernière mise à jour : mars 2026*

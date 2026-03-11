@@ -1026,7 +1026,6 @@ app.get("/api/infra-graph", (_req, res) => {
     { data: { id: "k3s-cluster",   label: "⎈ K3s Cluster",       type: "k8s",      status: "INFRA", tier: "platform" } },
     { data: { id: "traefik",       label: "🔀 Traefik Ingress",   type: "ingress",  status: "INFRA", tier: "platform" } },
     { data: { id: "letsencrypt",   label: "🔒 Let's Encrypt",     type: "ca",       status: "INFRA", tier: "external" } },
-    { data: { id: "vercel",        label: "▲ Vercel",             type: "cloud",    status: "INFRA", tier: "external" } },
     { data: { id: "firebase",      label: "🔥 Firebase / GCP",    type: "cloud",    status: "INFRA", tier: "external" } },
     { data: { id: "discord",       label: "💬 Discord Webhooks",  type: "external", status: "INFRA", tier: "external" } },
     { data: { id: "prometheus",    label: "📊 Prometheus",        type: "monitoring", status: "INFRA", parent: "INFRA", tier: "platform" } },

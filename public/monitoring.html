@@ -294,6 +294,36 @@
       </div>
     </div>
 
+    <!-- Analytics Portfolio Card -->
+    <div class="card">
+      <div class="card-header">
+        📊 Analytics Portfolio
+        <span class="badge" id="analyticsBadge">—</span>
+      </div>
+      <div class="card-body">
+        <div class="kpi-row" id="analyticsKPIs"></div>
+        <table style="margin-top: 12px;" id="analyticsTable">
+          <thead><tr><th>Project</th><th>Sessions</th><th>Users</th><th>Activation</th><th>Conversion</th><th>Decision</th></tr></thead>
+          <tbody id="analyticsTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Infisical / Secrets Card -->
+    <div class="card">
+      <div class="card-header">
+        🔐 Infisical Secrets
+        <span class="badge" id="infisicalBadge">—</span>
+      </div>
+      <div class="card-body">
+        <div class="kpi-row" id="infisicalKPIs"></div>
+        <table style="margin-top: 12px;" id="infisicalTable">
+          <thead><tr><th>Secret</th><th>Namespace</th><th>Status</th><th>Managed K8s Secret</th><th>Last Sync</th></tr></thead>
+          <tbody id="infisicalTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Test Coverage Card -->
     <div class="card">
       <div class="card-header">
@@ -385,6 +415,12 @@
 
       // Roadmap
       renderRoadmap(data.modules?.notion);
+
+      // Analytics Portfolio
+      renderAnalytics(data.modules?.analyticsPortfolio);
+
+      // Infisical / secrets sync
+      renderInfisical(data.modules?.infisical);
     }
 
     function renderGitHub(gh) {
@@ -512,6 +548,102 @@
           </div>
         </div>
       `).join('') || '<div class="empty">No roadmap items found</div>';
+    }
+
+    function renderAnalytics(analytics) {
+      const kpis = document.getElementById('analyticsKPIs');
+      const tbody = document.getElementById('analyticsTableBody');
+      const badge = document.getElementById('analyticsBadge');
+
+      if (!analytics || !analytics.projectCount) {
+        kpis.innerHTML = '<div class="empty">Analytics collector initializing... (set ANALYTICS_API_URL)</div>';
+        tbody.innerHTML = '';
+        badge.textContent = '—';
+        return;
+      }
+
+      badge.textContent = analytics.projectCount + ' projects';
+
+      const fmtPct = (v) => v != null ? (v * 100).toFixed(1) + '%' : '—';
+
+      kpis.innerHTML = `
+        <div class="kpi"><div class="value">${analytics.projectCount}</div><div class="label">Projects</div></div>
+        <div class="kpi"><div class="value">${fmtPct(analytics.avgActivationRate)}</div><div class="label">Avg Activation</div></div>
+        <div class="kpi"><div class="value">${fmtPct(analytics.avgConversionRate)}</div><div class="label">Avg Conversion</div></div>
+      `;
+
+      const decisionColors = {
+        'INVEST': 'var(--success)',
+        'IMPROVE': 'var(--warn)',
+        'STOP_OR_PIVOT': 'var(--danger)',
+        'INSUFFICIENT_DATA': 'var(--text-muted)',
+      };
+
+      tbody.innerHTML = Object.entries(analytics.projects || {}).map(([name, p]) => {
+        if (p.status === 'NO_DATA') {
+          return `<tr><td>${name}</td><td colspan="5" style="color: var(--text-muted); font-style: italic;">No data</td></tr>`;
+        }
+        const decColor = decisionColors[p.decision] || 'inherit';
+        const actClass = p.activationRate != null && p.activationRate < 0.3 ? 'danger' : '';
+        const convClass = p.conversionRate != null && p.conversionRate < 0.1 ? 'danger' : '';
+        return `
+          <tr>
+            <td>${name}</td>
+            <td>${p.totalSessions ?? '—'}</td>
+            <td>${p.uniqueUsers ?? '—'}</td>
+            <td class="${actClass}">${fmtPct(p.activationRate)}</td>
+            <td class="${convClass}">${fmtPct(p.conversionRate)}</td>
+            <td style="color: ${decColor}; font-weight: 600;">${p.decision || '—'}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderInfisical(infisical) {
+      const kpis = document.getElementById('infisicalKPIs');
+      const tbody = document.getElementById('infisicalTableBody');
+      const badge = document.getElementById('infisicalBadge');
+
+      if (!infisical || !infisical.summary) {
+        kpis.innerHTML = '<div class="empty">Infisical collector initializing... (requires K8s RBAC + INFISICAL_URL)</div>';
+        tbody.innerHTML = '';
+        badge.textContent = '—';
+        return;
+      }
+
+      const summary = infisical.summary;
+      const serverStatus = infisical.server?.status || 'UNKNOWN';
+      badge.textContent = serverStatus;
+
+      kpis.innerHTML = `
+        <div class="kpi"><div class="value">${summary.total ?? 0}</div><div class="label">CRDs</div></div>
+        <div class="kpi ${(summary.errored || 0) > 0 ? 'danger' : ''}"><div class="value">${summary.synced ?? 0}</div><div class="label">Synced</div></div>
+        <div class="kpi ${(summary.stale || 0) > 0 ? 'warn' : ''}"><div class="value">${summary.stale ?? 0}</div><div class="label">Stale</div></div>
+        <div class="kpi ${(summary.errored || 0) > 0 ? 'danger' : ''}"><div class="value">${summary.errored ?? 0}</div><div class="label">Errors</div></div>
+      `;
+
+      if (!infisical.secrets?.length) {
+        const reason = summary.unavailable || 'No InfisicalSecret CRDs found';
+        tbody.innerHTML = `<tr><td colspan="5" class="empty">${reason}</td></tr>`;
+        return;
+      }
+
+      const statusClass = {
+        synced: 'success',
+        stale: 'pending',
+        error: 'failure',
+        unknown: 'neutral',
+      };
+
+      tbody.innerHTML = infisical.secrets.map((secret) => `
+        <tr>
+          <td>${secret.name}</td>
+          <td>${secret.namespace}</td>
+          <td><span class="status ${statusClass[secret.syncStatus] || 'neutral'}">${secret.syncStatus || 'unknown'}</span></td>
+          <td>${secret.managedSecret || '—'}</td>
+          <td title="${secret.lastSynced || ''}">${secret.lastSynced ? timeAgo(secret.lastSynced) : (secret.error || '—')}</td>
+        </tr>
+      `).join('');
     }
 
     function renderIncidents(incidents) {

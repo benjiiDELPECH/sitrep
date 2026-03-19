@@ -1353,6 +1353,62 @@ app.get("/api/monitoring/roadmap", (_req, res) => {
   }
 });
 
+
+// ── API: Analytics Portfolio Module ─────────────────────────────────────────
+
+// ── API: Auth0 Health ───────────────────────────────────────────────────────
+app.get("/api/monitoring/auth0", async (_req, res) => {
+  try {
+    const auth0 = require("./lib/collectors/auth0");
+    const data = await auth0.collect();
+    const status = data.alerts && data.alerts.length > 0 ? 503 : 200;
+    res.status(status).json(data);
+  } catch (err) {
+    res.status(503).json({ error: "Auth0 collector not available", message: err.message });
+  }
+});
+
+// ── API: Infisical Secret Management Health ─────────────────────────────────
+app.get("/api/monitoring/infisical", async (_req, res) => {
+  try {
+    const infisical = require("./lib/collectors/infisical");
+    const data = await infisical.collect();
+    const status = data.alerts && data.alerts.length > 0 ? 503 : 200;
+    res.status(status).json(data);
+  } catch (err) {
+    res.status(503).json({ error: "Infisical collector not available", message: err.message });
+  }
+});
+
+app.get("/api/monitoring/infisical/summary", (_req, res) => {
+  try {
+    const infisical = require("./lib/collectors/infisical");
+    res.json(infisical.getSummary());
+  } catch (err) {
+    res.status(503).json({ error: "Infisical collector not available", message: err.message });
+  }
+});
+
+app.get("/api/monitoring/analytics", (_req, res) => {
+  try {
+    const analytics = require("./lib/collectors/analytics-portfolio");
+    res.json(analytics.getSummary());
+  } catch (err) {
+    res.status(503).json({ error: "Analytics Portfolio collector not available", message: err.message });
+  }
+});
+
+app.get("/api/monitoring/analytics/:projectId", (req, res) => {
+  try {
+    const analytics = require("./lib/collectors/analytics-portfolio");
+    const detail = analytics.getProjectDetail(req.params.projectId);
+    if (!detail) return res.status(404).json({ error: "Project not found" });
+    res.json(detail);
+  } catch (err) {
+    res.status(503).json({ error: "Analytics Portfolio collector not available" });
+  }
+});
+
 // ── API: Monitoring Hub Refresh ─────────────────────────────────────────────
 app.post("/api/monitoring/refresh", async (_req, res) => {
   try {

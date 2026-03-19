@@ -148,6 +148,28 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
     timeout: 10000,
   },
 
+  // ── ALERT-IMMO STAGING ────────────────────────────────────────────────────
+  {
+    id: "alert-immo-staging-gateway",
+    name: "Staging Gateway",
+    group: "ALERT-IMMO-STAGING",
+    type: "spring-boot",
+    icon: "🧪",
+    url: process.env.ALERTIMMO_STAGING_URL || "https://staging-api.real-estate-analytics.com/actuator/health",
+    timeout: 10000,
+  },
+  {
+    id: "alert-immo-staging-system",
+    name: "Staging Backends",
+    group: "ALERT-IMMO-STAGING",
+    type: "composite",
+    icon: "🧪",
+    url: process.env.ALERTIMMO_STAGING_URL
+      ? `${process.env.ALERTIMMO_STAGING_URL.replace(/\/actuator\/health$/, "")}/api/system/health`
+      : "https://staging-api.real-estate-analytics.com/api/system/health",
+    timeout: 15000,
+  },
+
   // ── EXAM-DRILL ──────────────────────────────────────────────────────────
   {
     id: "exam-drill-api",
@@ -224,6 +246,15 @@ if (externalConfigPath && fs.existsSync(externalConfigPath)) {
   // Re-add when deployed: { id: "portfolio", url: "https://benjamindelpech.dev", type: "web" }
 
   // ── INFRA ───────────────────────────────────────────────────────────────
+  {
+    id: "auth0-tenant",
+    name: "Auth0 Tenant",
+    group: "INFRA",
+    type: "web",
+    icon: "🔐",
+    url: "https://dev-vns5q4ii3hb5gp6g.us.auth0.com/.well-known/openid-configuration",
+    timeout: 8000,
+  },
   {
     id: "grafana",
     name: "Grafana",
